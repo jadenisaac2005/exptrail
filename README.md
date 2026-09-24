@@ -70,7 +70,7 @@ exptrail verify README.md                     # non-zero exit on any mismatch
 
 Runs can be referred to by folder name, path, run name (latest wins) or a unique substring. `--root DIR` points any command at another runs directory.
 
-**`table`** writes a markdown table between `` (appended if the markers aren't there yet). Each row links to the run folder and commit. Re-running it replaces the block; it never duplicates it. Add columns with repeatable `--metric` and `--config` flags. Floats are shown to `--precision` decimals (default 4). Only finished runs are included unless you pass `--include-failed`.
+**`table`** writes a markdown table between `<!-- results:start -->` and `<!-- results:end -->` marker lines (appended if the markers aren't there yet). Markers only count when each is on a line of its own, and there must be exactly one pair. Each row links to the run folder and commit. Re-running it replaces the block; it never duplicates it. Add columns with repeatable `--metric` and `--config` flags. Floats are shown to `--precision` decimals (default 4). Only finished runs are included unless you pass `--include-failed`.
 
 **`verify`** re-reads every run linked from the block. It fails if a displayed metric doesn't match `summary.json` at the displayed precision, if a config value doesn't exactly match `config.json`, if the commit differs from `meta.json`, or if a linked run folder is missing. Runs that were dirty, failed or git-less produce warnings, and `--strict` turns them into failures. Put it in CI:
 

@@ -165,6 +165,22 @@ def test_redact_paths_opt_out(repo, fake_home):
 
 
 @pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("https://user:tok@github.com/o/r.git", "https://github.com/o/r.git"),
+        ("https://tok@github.com/o/r.git", "https://github.com/o/r.git"),
+        ("ssh://user:pw@host/o/r.git", "ssh://host/o/r.git"),
+        ("ssh://git@github.com/o/r.git", "ssh://git@github.com/o/r.git"),
+        ("git@github.com:o/r.git", "git@github.com:o/r.git"),
+    ],
+)
+def test_clean_remote_strips_credentials(url, expected):
+    from exptrail.meta import _clean_remote
+
+    assert _clean_remote(url) == expected
+
+
+@pytest.mark.parametrize(
     "text,expected",
     [
         ("/home/me", "~"),
@@ -205,6 +221,23 @@ def test_root_from_env_and_name_slug(workdir, monkeypatch, quiet):
     assert run.dir.name.endswith("_lr-0.1-bs-32")
 
 
+def test_metrics_csv_exists_without_log_calls(workdir, quiet):
+    with Run("nolog") as run:
+        assert (run.dir / "metrics.csv").read_text().strip() == "step"
+        run.summary(acc=1.0)
+    assert rows(run) == []
+
+
+def test_save_artifact_rejects_escaping_names(workdir, quiet):
+    (workdir / "model.npz").write_bytes(b"w")
+    with Run("art") as run:
+        for bad in ("../meta.json", "/tmp/x", "a/b", ".."):
+            with pytest.raises(ValueError):
+                run.save_artifact("model.npz", name=bad)
+        assert run.save_artifact("model.npz", name="best.npz").name == "best.npz"
+    assert read(run, "meta.json")["name"] == "art"
+
+
 def test_save_artifact_file_and_dir(workdir, quiet):
     (workdir / "model.npz").write_bytes(b"weights")
     (workdir / "ckpt").mkdir()
@@ -242,6 +275,17 @@ def test_track_decorator(workdir, quiet):
     assert run_dir.name.endswith("_train")
     assert json.loads((run_dir / "config.json").read_text()) == {"lr": 0.5, "epochs": 2}
     assert json.loads((run_dir / "summary.json").read_text()) == {"test_acc": 0.9}
+
+
+def test_track_decorator_with_positional_run(workdir, quiet):
+    @track
+    def train(lr, run=None):
+        run.log(loss=lr)
+        return {"acc": 1.0}
+
+    assert train(0.1, None) == {"acc": 1.0}  # run slot filled positionally
+    (run_dir,) = (workdir / "runs").iterdir()
+    assert json.loads((run_dir / "config.json").read_text()) == {"lr": 0.1}
 
 
 def test_track_decorator_without_parens_and_failure(workdir, quiet):

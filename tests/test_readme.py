@@ -184,3 +184,57 @@ def test_no_git_rows(workdir, quiet):
 )
 def test_cell_matches(cell, value, ok):
     assert cell_matches(cell, value) is ok
+
+
+def test_markers_mentioned_inline_are_not_a_block(three_runs, repo):
+    readme = repo / "README.md"
+    prose = f"`table` writes between `{START}` and `{END}` markers.\n"
+    readme.write_text(prose)
+    assert table() == 0
+    text = readme.read_text()
+    assert text.startswith(prose)  # prose untouched, block appended
+    assert main(["verify", "README.md"]) == 0
+    assert table() == 0 and readme.read_text() == text
+
+
+def test_verify_rejects_second_block(three_runs, repo, capsys):
+    table()
+    readme = repo / "README.md"
+    good = readme.read_text()
+    readme.write_text(good + "\n" + good.replace("0.9807", "0.9999"))
+    assert main(["verify", "README.md"]) == 1
+    assert "exactly one" in capsys.readouterr().err
+
+
+def test_verify_rejects_row_disguised_as_separator(three_runs, repo):
+    table()
+    readme = repo / "README.md"
+    text = readme.read_text()
+    readme.write_text(text.replace("|---|---|---|", "| [fake](runs/x/) | 0.9999 | `abc1234` |"))
+    assert main(["verify", "README.md"]) == 1
+
+
+def test_verify_rejects_missing_or_corrupt_summary(three_runs, repo, capsys):
+    main(["table", "--metric", "nonexistent", "--readme", "README.md"])  # cells show —
+    assert main(["verify", "README.md"]) == 0
+    (three_runs[0].dir / "summary.json").unlink()
+    (three_runs[1].dir / "config.json").write_text("{not json")
+    assert main(["verify", "README.md"]) == 1
+    err = capsys.readouterr().err
+    assert err.count("unreadable run data") == 2
+
+
+def test_duplicate_columns_rejected(three_runs, repo, capsys):
+    assert main(["table", "--metric", "lr", "--config", "lr", "--readme", "README.md"]) == 2
+    assert main(["table", "--metric", "commit", "--readme", "README.md"]) == 2
+    assert "unique" in capsys.readouterr().err
+
+
+def test_run_names_are_escaped_in_links(repo, quiet):
+    with Run("evil]|name\n[x](y)") as run:
+        run.summary(test_acc=0.5)
+    table()
+    text = (repo / "README.md").read_text()
+    row = [ln for ln in text.splitlines() if "0.5000" in ln][0]
+    assert row.startswith("| [evil\\]\\|name \\[x\\](y)](runs/")
+    assert main(["verify", "README.md"]) == 0

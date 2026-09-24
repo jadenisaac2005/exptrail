@@ -169,6 +169,7 @@ class Run:
         _write_json(self.dir / "config.json", self.config)
         _write_json(self.dir / "meta.json", self.meta)
         _write_json(self.dir / "summary.json", self._summary)
+        self._expand_columns(self.dir / "metrics.csv", ["step"])  # exists even if log() is never called
         self._warn_about_git(git)
         return self
 
@@ -288,7 +289,10 @@ class Run:
         src = Path(path)
         dest_dir = run_dir / "artifacts"
         dest_dir.mkdir(exist_ok=True)
-        dest = dest_dir / (name or src.name)
+        name = name or src.resolve().name
+        if name in ("", ".", "..") or Path(name).name != name or "\\" in name:
+            raise ValueError(f"artifact name must be a plain file name, got {name!r}")
+        dest = dest_dir / name
         if src.is_dir():
             shutil.copytree(src, dest, dirs_exist_ok=True)
         else:
@@ -319,16 +323,18 @@ def track(
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
+            bound = sig.bind_partial(*args, **kwargs)
             cfg = config
             if cfg is None:
-                bound = sig.bind_partial(*args, **kwargs)
-                bound.apply_defaults()
-                cfg = {k: v for k, v in bound.arguments.items() if k != "run"}
+                with_defaults = sig.bind_partial(*args, **kwargs)
+                with_defaults.apply_defaults()
+                cfg = {k: v for k, v in with_defaults.arguments.items() if k != "run"}
             with Run(name or func.__name__, config=cfg, tags=tags, seeds=seeds, root=root,
                      redact_paths=redact_paths) as run:
                 if wants_run:
-                    kwargs["run"] = run
-                result = func(*args, **kwargs)
+                    # Replace ``run`` wherever it was bound (positional or keyword).
+                    bound.arguments["run"] = run
+                result = func(*bound.args, **bound.kwargs)
                 if isinstance(result, dict):
                     run.summary(**result)
                 return result

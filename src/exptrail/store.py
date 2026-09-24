@@ -13,10 +13,18 @@ from pathlib import Path
 class SavedRun:
     path: Path
 
+    def read_json(self, name: str) -> dict:
+        """Strict read: raises if the file is missing, corrupt or not an object."""
+        data = json.loads((self.path / name).read_text())
+        if not isinstance(data, dict):
+            raise ValueError(f"{name} is not a JSON object")
+        return data
+
     def _json(self, name: str) -> dict:
+        """Tolerant read for display commands."""
         try:
-            return json.loads((self.path / name).read_text())
-        except (FileNotFoundError, json.JSONDecodeError):
+            return self.read_json(name)
+        except (OSError, ValueError):
             return {}
 
     @property

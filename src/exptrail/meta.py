@@ -22,8 +22,18 @@ def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
 
 
 def _clean_remote(url: str) -> str:
-    """Strip credentials from a remote URL so tokens never land in meta.json."""
-    return re.sub(r"(https?://)[^@/]+@", r"\1", url.strip())
+    """Strip credentials from a remote URL so tokens never land in meta.json.
+
+    Any ``user:password@`` is removed, as is a bare ``token@`` on http(s).
+    A plain SSH user (``ssh://git@host``, ``git@host:org/repo``) is kept.
+    """
+    def strip(m: re.Match) -> str:
+        scheme, userinfo = m.group(1), m.group(2)
+        if ":" in userinfo or scheme.lower().startswith("http"):
+            return scheme
+        return m.group(0)
+
+    return re.sub(r"^([a-zA-Z][a-zA-Z0-9+.-]*://)([^@/]+)@", strip, url.strip())
 
 
 def git_info(cwd: Path) -> tuple[dict, str | None]:
