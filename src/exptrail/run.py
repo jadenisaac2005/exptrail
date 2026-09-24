@@ -132,6 +132,7 @@ class Run:
         if self.dir is not None:
             raise RuntimeError("run already started")
         started = _now()
+        self.root = self.root.resolve()  # immune to os.chdir() during the run
         self.root.mkdir(parents=True, exist_ok=True)
         base = f"{started.astimezone(timezone.utc):%Y%m%d-%H%M%S}_{_slug(self.name)}"
         for i in range(1000):
