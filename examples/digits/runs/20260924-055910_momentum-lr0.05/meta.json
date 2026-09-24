@@ -10,16 +10,16 @@
     "numpy": 0,
     "split": 0
   },
-  "start_time": "2026-09-24T05:53:16.020134+00:00",
-  "end_time": "2026-09-24T05:53:16.208410+00:00",
-  "duration_s": 0.188,
+  "start_time": "2026-09-24T05:59:10.105305+00:00",
+  "end_time": "2026-09-24T05:59:10.305307+00:00",
+  "duration_s": 0.2,
   "git": {
     "available": true,
-    "commit": "8f3c779efeb6512c2e2137cfb908bb184778ebfe",
-    "branch": "squash-main",
+    "commit": "42124f208a0411b96a60bc720978ac602389a53e",
+    "branch": "main",
     "dirty": false,
     "root": "~/Experiment-logger",
-    "remote": "https://github.com/jadenisaac2005/Experiment-logger"
+    "remote": "https://github.com/jadenisaac2005/exptrail"
   },
   "python": "3.11.15",
   "python_executable": "/usr/local/bin/python",

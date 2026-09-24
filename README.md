@@ -89,9 +89,9 @@ For links in the table to work on GitHub, commit the run folders you report.
 <!-- command: exptrail --root examples/digits/runs table --metric test_acc --config lr --config momentum --readme README.md -->
 | run | lr | momentum | test_acc | commit |
 |---|---|---|---|---|
-| [momentum-lr0.01](examples/digits/runs/20260924-055315_momentum-lr0.01/) | 0.01 | 0.9 | 0.9611 | [`8f3c779`](https://github.com/jadenisaac2005/Experiment-logger/commit/8f3c779efeb6512c2e2137cfb908bb184778ebfe) |
-| [sgd-lr0.1](examples/digits/runs/20260924-055315_sgd-lr0.1/) | 0.1 | 0.0 | 0.9611 | [`8f3c779`](https://github.com/jadenisaac2005/Experiment-logger/commit/8f3c779efeb6512c2e2137cfb908bb184778ebfe) |
-| [momentum-lr0.05](examples/digits/runs/20260924-055316_momentum-lr0.05/) | 0.05 | 0.9 | 0.9694 | [`8f3c779`](https://github.com/jadenisaac2005/Experiment-logger/commit/8f3c779efeb6512c2e2137cfb908bb184778ebfe) |
+| [momentum-lr0.01](examples/digits/runs/20260924-055909_momentum-lr0.01/) | 0.01 | 0.9 | 0.9611 | [`42124f2`](https://github.com/jadenisaac2005/exptrail/commit/42124f208a0411b96a60bc720978ac602389a53e) |
+| [sgd-lr0.1](examples/digits/runs/20260924-055909_sgd-lr0.1/) | 0.1 | 0.0 | 0.9611 | [`42124f2`](https://github.com/jadenisaac2005/exptrail/commit/42124f208a0411b96a60bc720978ac602389a53e) |
+| [momentum-lr0.05](examples/digits/runs/20260924-055910_momentum-lr0.05/) | 0.05 | 0.9 | 0.9694 | [`42124f2`](https://github.com/jadenisaac2005/exptrail/commit/42124f208a0411b96a60bc720978ac602389a53e) |
 <!-- results:end -->
 
 ## License
