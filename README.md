@@ -8,8 +8,6 @@ README results tables drift: configs get overwritten, loss curves aren't saved, 
 - Works with NumPy-from-scratch, PyTorch, sklearn, anything: you just pass numbers.
 - Works without git (e.g. Colab): recorded as `no-git` with a warning, never an error.
 
-> **Name.** Candidates checked against PyPI on 2026-09-24: **`exptrail`** (free, used), `trailrun` (free), `resultlock` (free). `runlog`, `runledger`, `runstamp` and `labbook` were taken.
-
 ## Install
 
 ```bash
