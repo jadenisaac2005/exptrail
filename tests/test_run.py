@@ -52,6 +52,7 @@ def test_metrics_flushed_before_run_ends(workdir, quiet):
         assert read(run, "meta.json")["status"] == "running"
         run.summary(acc=0.5)
         assert read(run, "summary.json") == {"acc": 0.5}
+        assert run.summary_data == {"acc": 0.5}
 
 
 def test_new_metric_midrun_expands_header(workdir, quiet):

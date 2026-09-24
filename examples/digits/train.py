@@ -7,6 +7,7 @@ Each config becomes a run under examples/digits/runs/, and the results
 table in examples/digits/README.md is regenerated from those runs.
 """
 
+import os
 import tempfile
 from pathlib import Path
 
@@ -101,16 +102,17 @@ def train(cfg):
         with tempfile.TemporaryDirectory() as tmp:
             np.savez(Path(tmp) / "model.npz", **params)
             run.save_artifact(Path(tmp) / "model.npz")
-    print(f"{cfg['name']:>16}: test_acc={run._summary['test_acc']:.4f}  -> {run.dir.name}")
+    print(f"{cfg['name']:>16}: test_acc={run.summary_data['test_acc']:.4f}  -> {run.dir.name}")
     return run
 
 
 if __name__ == "__main__":
     runs = [train(cfg) for cfg in CONFIGS]
+    rel = lambda p: os.path.relpath(p)  # keep local absolute paths out of the README
     exptrail_cli([
-        "--root", str(ROOT), "table",
+        "--root", rel(ROOT), "table",
         "--metric", "test_acc", "--metric", "val_acc",
         "--config", "lr", "--config", "momentum",
         "--runs", *[r.dir.name for r in runs],
-        "--readme", str(HERE / "README.md"),
+        "--readme", rel(HERE / "README.md"),
     ])

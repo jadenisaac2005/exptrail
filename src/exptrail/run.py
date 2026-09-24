@@ -278,6 +278,11 @@ class Run:
                 self._summary[k] = to_jsonable(v)
         _write_json(run_dir / "summary.json", self._summary)
 
+    @property
+    def summary_data(self) -> dict:
+        """A copy of the summary values recorded so far."""
+        return dict(self._summary)
+
     def save_artifact(self, path: str | os.PathLike, name: str | None = None) -> Path:
         """Copy a file or directory into ``<run>/artifacts/``."""
         run_dir = self._require_started()
