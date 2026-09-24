@@ -42,6 +42,25 @@ def _github_url(remote: str | None) -> str | None:
     return f"https://{m.group(1)}/{m.group(2)}" if m else None
 
 
+def _tree_url(base: str, path: str) -> str:
+    """URL of ``path`` on the default branch (``HEAD``) of a GitHub/GitLab repo."""
+    sep = "/-/tree/HEAD/" if "gitlab.com" in base else "/tree/HEAD/"
+    return base + sep + path
+
+
+# https://github.com/<owner>/<repo>/tree/<ref>/<path>  (GitLab: .../-/tree/...)
+_TREE_URL = re.compile(r"^(https://(?:github|gitlab)\.com/.+?)(?:/-)?/(?:tree|blob)/[^/]+/(.+?)/?$")
+
+
+def repo_root(start: Path) -> Path:
+    """The git work tree containing ``start``, or ``start`` itself if there is none."""
+    start = start.resolve()
+    for d in (start, *start.parents):
+        if (d / ".git").exists():
+            return d
+    return start
+
+
 def commit_cell(run: SavedRun) -> str:
     git = run.meta.get("git", {})
     commit = git.get("commit")
@@ -60,9 +79,16 @@ def render_table(
     config_keys: list[str] = (),
     precision: int | None = 4,
     command: str | None = None,
+    absolute_links: bool = False,
 ) -> str:
-    """Markdown table: one row per run, linking to the run folder and commit."""
+    """Markdown table: one row per run, linking to the run folder and commit.
+
+    Run links are relative to the README, or with ``absolute_links`` point at
+    the run folder on the repo's hosted default branch (so they also work on
+    PyPI, which can't resolve relative links).
+    """
     base = readme.resolve().parent
+    root = repo_root(base)
     header = ["run", *config_keys, *metrics, "commit"]
     if len(set(header)) != len(header):
         raise ValueError(f"each column must be unique (and not 'run' or 'commit'): {header[1:-1]}")
@@ -74,7 +100,13 @@ def render_table(
         lines.append(f"<!-- command: {command} -->")
     lines += ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
     for run in runs:
-        link = Path(os.path.relpath(run.path.resolve(), base)).as_posix()
+        if absolute_links:
+            hosted = _github_url(run.meta.get("git", {}).get("remote"))
+            if not hosted:
+                raise ValueError(f"{run.id}: no GitHub/GitLab remote recorded, can't build an absolute link")
+            link = _tree_url(hosted, Path(os.path.relpath(run.path.resolve(), root)).as_posix())
+        else:
+            link = Path(os.path.relpath(run.path.resolve(), base)).as_posix()
         config, summary = run.config, run.summary
         cells = [f"[{escape_label(run.name)}]({link}/)"]
         cells += [format_value(config.get(k), None) for k in config_keys]  # configs: exact
@@ -207,12 +239,24 @@ def verify_readme(readme: Path, strict: bool = False) -> VerifyResult:
         if len(cells) != len(header) or not link:
             res.errors.append(f"malformed row: {line.strip()}")
             continue
-        label = link.group(1)
-        path = (base / link.group(2)).resolve()
+        label, target = link.group(1), link.group(2)
+        hosted_base = None
+        if target.startswith(("http://", "https://")):
+            m = _TREE_URL.match(target)
+            if not m:
+                res.errors.append(f"{label}: can't map link {target} to a local run folder")
+                continue
+            hosted_base, rel = m.groups()
+            path = (repo_root(base) / rel).resolve()
+        else:
+            path = (base / target).resolve()
         if not is_run_dir(path):
             res.errors.append(f"{label}: run folder {link.group(2)} not found")
             continue
         run = SavedRun(path)
+        recorded = _github_url(run.meta.get("git", {}).get("remote"))
+        if hosted_base and recorded and hosted_base != recorded:
+            res.errors.append(f"{label}: link points at {hosted_base} but the run was recorded in {recorded}")
         try:
             config, summary = run.read_json("config.json"), run.read_json("summary.json")
         except (OSError, ValueError) as exc:

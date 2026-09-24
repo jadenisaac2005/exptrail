@@ -106,7 +106,8 @@ def cmd_table(args) -> int:
         return 1
     readme = Path(args.readme)
     command = "exptrail " + shlex.join(args.argv)
-    block = render_table(runs, args.metric, readme, args.config or [], args.precision, command)
+    block = render_table(runs, args.metric, readme, args.config or [], args.precision, command,
+                         absolute_links=args.absolute_links)
     changed = write_table(readme, block)
     print(f"{'updated' if changed else 'unchanged'}: {readme} ({len(runs)} run{'s' if len(runs) != 1 else ''})")
     for r in runs:
@@ -160,6 +161,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--config", action="append", help="config key to show as a column (repeatable)")
     s.add_argument("--precision", type=int, default=4, help="decimals for floats (default 4)")
     s.add_argument("--include-failed", action="store_true")
+    s.add_argument("--absolute-links", action="store_true",
+                   help="link run folders by their GitHub/GitLab URL (for READMEs shown on PyPI)")
     s.set_defaults(func=cmd_table)
 
     s = sub.add_parser("verify", help="check README results against saved runs")

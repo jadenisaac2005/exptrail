@@ -238,3 +238,43 @@ def test_run_names_are_escaped_in_links(repo, quiet):
     row = [ln for ln in text.splitlines() if "0.5000" in ln][0]
     assert row.startswith("| [evil\\]\\|name \\[x\\](y)](runs/")
     assert main(["verify", "README.md"]) == 0
+
+
+def test_absolute_links_point_at_hosted_repo_and_verify(three_runs, repo):
+    assert table("--absolute-links") == 0
+    text = (repo / "README.md").read_text()
+    run = three_runs[1]
+    assert f"[momentum](https://github.com/me/proj/tree/HEAD/runs/{run.dir.name}/)" in text
+    assert "](runs/" not in text  # no relative links left
+    assert main(["verify", "README.md"]) == 0
+    # a tampered number is still caught through an absolute link
+    (repo / "README.md").write_text(text.replace("| 0.9807 |", "| 0.9817 |"))
+    assert main(["verify", "README.md"]) == 1
+
+
+def test_absolute_links_resolve_from_repo_root_for_nested_readme(three_runs, repo):
+    (repo / "docs").mkdir()
+    assert main(["--root", "runs", "table", "--metric", "test_acc", "--absolute-links",
+                 "--readme", "docs/README.md"]) == 0
+    text = (repo / "docs" / "README.md").read_text()
+    assert "/tree/HEAD/runs/" in text and "../runs" not in text
+    assert main(["verify", "docs/README.md"]) == 0
+
+
+def test_absolute_link_to_other_repo_or_unmappable_url_fails(three_runs, repo, capsys):
+    table("--absolute-links")
+    readme = repo / "README.md"
+    good = readme.read_text()
+    readme.write_text(good.replace("github.com/me/proj/tree", "github.com/someone/else/tree", 1))
+    assert main(["verify", "README.md"]) == 1
+    readme.write_text(good.replace("https://github.com/me/proj/tree/HEAD/runs/", "https://example.com/runs/", 1))
+    assert main(["verify", "README.md"]) == 1
+    err = capsys.readouterr().err
+    assert "was recorded in https://github.com/me/proj" in err and "can't map link" in err
+
+
+def test_absolute_links_need_a_hosted_remote(workdir, quiet, capsys):
+    with Run("nogit") as run:
+        run.summary(test_acc=0.5)
+    assert table("--absolute-links") == 2
+    assert "no GitHub/GitLab remote" in capsys.readouterr().err

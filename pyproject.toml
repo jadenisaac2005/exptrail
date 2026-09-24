@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,14 +7,32 @@ name = "exptrail"
 version = "0.1.0"
 description = "Local, framework-agnostic ML experiment logging that keeps README numbers verifiable."
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
+authors = [{ name = "Jaden Isaac" }]
+keywords = ["machine-learning", "experiment-tracking", "reproducibility", "logging", "mlops"]
 dependencies = []
 classifiers = [
-    "License :: OSI Approved :: MIT License",
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Logging",
 ]
+
+[project.urls]
+Homepage = "https://github.com/jadenisaac2005/exptrail"
+Source = "https://github.com/jadenisaac2005/exptrail"
+Issues = "https://github.com/jadenisaac2005/exptrail/issues"
 
 [project.optional-dependencies]
 plot = ["matplotlib"]
