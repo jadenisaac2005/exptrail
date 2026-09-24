@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -20,7 +21,11 @@ def format_value(value, precision: int | None) -> str:
     if isinstance(value, bool) or isinstance(value, int):
         return str(int(value))
     if isinstance(value, float):
-        return f"{value:.{precision}f}" if precision is not None else repr(value)
+        if precision is None or not math.isfinite(value):
+            return repr(value)
+        if value != 0 and abs(value) < 0.5 * 10**-precision:  # would print as 0.000
+            return f"{value:.{max(precision - 1, 1)}e}"
+        return f"{value:.{precision}f}"
     return str(value).replace("|", "\\|")
 
 
@@ -64,7 +69,7 @@ def render_table(
         link = Path(os.path.relpath(run.path.resolve(), base)).as_posix()
         config, summary = run.config, run.summary
         cells = [f"[{run.name}]({link}/)"]
-        cells += [format_value(config.get(k), precision) for k in config_keys]
+        cells += [format_value(config.get(k), None) for k in config_keys]  # configs: exact
         cells += [format_value(summary.get(k), precision) for k in metrics]
         cells.append(commit_cell(run))
         lines.append("| " + " | ".join(cells) + " |")
@@ -179,15 +184,19 @@ def verify_readme(readme: Path, strict: bool = False) -> VerifyResult:
         for key, cell in zip(header[1:-1], cells[1:-1]):
             source, value = (summary, summary.get(key)) if key in summary else (config, config.get(key))
             res.checked += 1
-            if not cell_matches(cell, value):
+            # metrics may be rounded for display; config values are shown exactly
+            exact = source is config and key not in summary
+            if not (cell == format_value(value, None) if exact else cell_matches(cell, value)):
                 where = "summary.json" if source is summary else "config.json"
                 res.errors.append(f"{label}: {key} shows {cell} but {where} has {value!r}")
-        commit = run.commit
-        commit_cell_text = cells[-1]
-        if commit and commit[:7] not in commit_cell_text:
-            res.errors.append(f"{label}: commit shows {commit_cell_text} but meta.json has {commit[:7]}")
-        if not commit and commit_cell_text != "no-git":
-            res.errors.append(f"{label}: commit shows {commit_cell_text} but run has no git info")
+        commit, shown = run.commit, cells[-1]
+        if commit:
+            short = re.search(r"`([0-9a-f]+)`", shown)
+            linked = re.findall(r"/commit/([0-9a-f]+)", shown)
+            if not short or short.group(1) != commit[:7] or any(c != commit for c in linked):
+                res.errors.append(f"{label}: commit shows {shown} but meta.json has {commit[:7]}")
+        elif shown != "no-git":
+            res.errors.append(f"{label}: commit shows {shown} but run has no git info")
         problems = []
         if run.status != "finished":
             problems.append(f"status is {run.status}")
