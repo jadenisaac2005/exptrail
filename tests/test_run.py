@@ -1,5 +1,6 @@
 import csv
 import json
+import sys
 import warnings
 
 import pytest
@@ -48,7 +49,7 @@ def test_metrics_flushed_before_run_ends(workdir, quiet):
     with Run("flush") as run:
         run.log(step=0, loss=1.5)
         # read while the run is still open
-        assert rows(run) == [{"step": "0", "elapsed": rows(run)[0]["elapsed"], "loss": "1.5"}]
+        assert rows(run) == [{"step": "0", "loss": "1.5"}]
         assert read(run, "meta.json")["status"] == "running"
         run.summary(acc=0.5)
         assert read(run, "summary.json") == {"acc": 0.5}
@@ -61,17 +62,15 @@ def test_new_metric_midrun_expands_header(workdir, quiet):
         run.log(loss=0.5, val_acc=0.8)
         run.log(loss=0.25)
     data = rows(run)
-    assert list(data[0]) == ["step", "elapsed", "loss", "val_acc"]
+    assert list(data[0]) == ["step", "loss", "val_acc"]
     assert [r["val_acc"] for r in data] == ["", "0.8", ""]
     assert [r["step"] for r in data] == ["0", "1", "2"]  # auto-increment
 
 
-def test_log_rejects_non_numeric_and_reserved(workdir, quiet):
+def test_log_rejects_non_numeric(workdir, quiet):
     with Run("bad") as run:
         with pytest.raises(TypeError):
             run.log(loss="high")
-        with pytest.raises(ValueError):
-            run.log(elapsed=3)
 
 
 def test_crash_marks_failed_and_saves_traceback(workdir, quiet):
@@ -125,6 +124,62 @@ def test_no_git_is_recorded_gracefully(workdir, monkeypatch):
     meta = read(run, "meta.json")
     assert meta["git"] == {"available": False, "reason": "git executable not found"}
     assert meta["status"] == "finished"
+
+
+def test_package_versions_only_track_frameworks(workdir, quiet):
+    with Run("pkgs") as run:
+        pass
+    packages = read(run, "meta.json")["packages"]
+    assert set(packages) <= {"numpy", "torch", "scikit-learn"}
+
+
+@pytest.fixture
+def fake_home(repo, monkeypatch):
+    """Make the repo live under $HOME and run with a home-relative argv."""
+    home = repo.parent
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(sys, "argv", [str(repo / "train.py"), f"--out={repo}/o.npz", "--lr", "0.1"])
+    monkeypatch.setattr(sys, "executable", str(home / ".venv" / "bin" / "python"))
+    return home
+
+
+def test_paths_redacted_by_default(repo, fake_home):
+    with Run("redact") as run:
+        pass
+    meta = read(run, "meta.json")
+    rel = repo.name
+    assert meta["cwd"] == f"~/{rel}"
+    assert meta["python_executable"] == "~/.venv/bin/python"
+    assert meta["argv"] == [f"~/{rel}/train.py", f"--out=~/{rel}/o.npz", "--lr", "0.1"]
+    assert meta["git"]["root"] == f"~/{rel}"
+    assert str(fake_home) not in (run.dir / "meta.json").read_text()
+
+
+def test_redact_paths_opt_out(repo, fake_home):
+    with Run("raw", redact_paths=False) as run:
+        pass
+    meta = read(run, "meta.json")
+    assert meta["cwd"] == str(repo)
+    assert meta["python_executable"] == str(fake_home / ".venv" / "bin" / "python")
+    assert meta["argv"][0] == str(repo / "train.py")
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("/home/me", "~"),
+        ("/home/me/proj/x.py", "~/proj/x.py"),
+        ("--out=/home/me/o", "--out=~/o"),
+        ("/home/me2/x", "/home/me2/x"),  # different user, same prefix
+        ("/mnt/home/me/x", "/mnt/home/me/x"),  # not at the start of a path
+        ("--lr", "--lr"),
+    ],
+)
+def test_redact_home(text, expected):
+    from exptrail.meta import redact_home
+
+    assert redact_home(text, home="/home/me") == expected
+    assert redact_home(text, home="/") == text  # home at filesystem root: leave alone
 
 
 def test_not_a_repo(workdir):

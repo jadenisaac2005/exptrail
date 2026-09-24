@@ -18,9 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__
-from .meta import environment, git_info
-
-RESERVED_COLUMNS = ("step", "elapsed")
+from .meta import environment, git_info, redact_home
 
 
 class DirtyTreeWarning(UserWarning):
@@ -110,12 +108,14 @@ class Run:
         seeds: Any = None,
         root: str | os.PathLike | None = None,
         notes: str | None = None,
+        redact_paths: bool = True,
     ):
         self.name = name
         self.config = dict(config or {})
         self.tags = list(tags or [])
         self.seeds = seeds
         self.notes = notes
+        self.redact_paths = redact_paths
         self.root = Path(root) if root is not None else default_root()
         self.dir: Path | None = None
         self.meta: dict = {}
@@ -148,6 +148,8 @@ class Run:
         self._t0 = time.monotonic()
 
         git, diff = git_info(Path.cwd())
+        if self.redact_paths and git.get("root"):
+            git["root"] = redact_home(git["root"])
         if diff is not None:
             (self.dir / "git_diff.patch").write_text(diff)
             git["diff_file"] = "git_diff.patch"
@@ -161,7 +163,7 @@ class Run:
             "end_time": None,
             "duration_s": None,
             "git": git,
-            **environment(),
+            **environment(self.redact_paths),
             "exptrail_version": __version__,
         }
         _write_json(self.dir / "config.json", self.config)
@@ -230,13 +232,10 @@ class Run:
     def log(self, step: int | None = None, **metrics: Any) -> None:
         """Append one row to metrics.csv and flush it to disk immediately."""
         run_dir = self._require_started()
-        for key in RESERVED_COLUMNS:
-            if key in metrics:
-                raise ValueError(f"{key!r} is a reserved column name")
         if step is None:
             step = self._auto_step
         self._auto_step = int(step) + 1
-        row = {"step": step, "elapsed": round(time.monotonic() - self._t0, 3)}
+        row = {"step": step}
         row.update({k: _to_number(k, v) for k, v in metrics.items()})
 
         new_keys = [k for k in row if k not in self._columns]
@@ -305,6 +304,7 @@ def track(
     tags: list[str] | None = None,
     seeds: Any = None,
     root: str | os.PathLike | None = None,
+    redact_paths: bool = True,
 ):
     """Decorator form of :class:`Run`.
 
@@ -324,7 +324,8 @@ def track(
                 bound = sig.bind_partial(*args, **kwargs)
                 bound.apply_defaults()
                 cfg = {k: v for k, v in bound.arguments.items() if k != "run"}
-            with Run(name or func.__name__, config=cfg, tags=tags, seeds=seeds, root=root) as run:
+            with Run(name or func.__name__, config=cfg, tags=tags, seeds=seeds, root=root,
+                     redact_paths=redact_paths) as run:
                 if wants_run:
                     kwargs["run"] = run
                 result = func(*args, **kwargs)

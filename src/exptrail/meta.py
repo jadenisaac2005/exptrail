@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import platform
 import re
 import shutil
@@ -11,7 +12,7 @@ import sys
 from importlib import metadata
 from pathlib import Path
 
-TRACKED_PACKAGES = ("numpy", "torch", "scikit-learn", "scipy", "pandas", "jax", "matplotlib")
+TRACKED_PACKAGES = ("numpy", "torch", "scikit-learn")
 
 
 def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
@@ -71,13 +72,25 @@ def package_versions(names=TRACKED_PACKAGES) -> dict[str, str]:
     return out
 
 
-def environment() -> dict:
+def redact_home(text: str, home: str | None = None) -> str:
+    """Replace the user's home directory with ``~`` so usernames don't leak."""
+    home = (home if home is not None else os.path.expanduser("~")).rstrip("/\\")
+    if not home or home == "~":
+        return text  # no home, or home is the filesystem root
+    # Only at the start of the string or of an option value (--out=/home/me/x),
+    # and only as a whole path component (/home/me2 is left alone).
+    pattern = r"(?:^|(?<=[=:,\s]))" + re.escape(home) + r"(?=[/\\]|$|[\s,:])"
+    return re.sub(pattern, "~", text)
+
+
+def environment(redact_paths: bool = True) -> dict:
+    clean = redact_home if redact_paths else (lambda s: s)
     return {
         "python": sys.version.split()[0],
-        "python_executable": sys.executable,
+        "python_executable": clean(sys.executable),
         "platform": platform.platform(),
         "hostname": socket.gethostname(),
-        "argv": list(sys.argv),
-        "cwd": str(Path.cwd()),
+        "argv": [clean(a) for a in sys.argv],
+        "cwd": clean(str(Path.cwd())),
         "packages": package_versions(),
     }

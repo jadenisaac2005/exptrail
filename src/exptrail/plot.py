@@ -7,8 +7,8 @@ from pathlib import Path
 from .store import SavedRun
 
 
-def plot_runs(runs: list[SavedRun], metric: str, out: Path, x: str = "step") -> int:
-    """Plot ``metric`` against ``x`` for each run; return how many runs had data."""
+def plot_runs(runs: list[SavedRun], metric: str, out: Path) -> int:
+    """Plot ``metric`` against step for each run; return how many runs had data."""
     try:
         import matplotlib
 
@@ -20,13 +20,13 @@ def plot_runs(runs: list[SavedRun], metric: str, out: Path, x: str = "step") -> 
     fig, ax = plt.subplots(figsize=(7, 4.5))
     plotted = 0
     for run in runs:
-        points = [(r[x], r[metric]) for r in run.metrics() if x in r and metric in r]
+        points = [(r["step"], r[metric]) for r in run.metrics() if "step" in r and metric in r]
         if not points:
             continue
         xs, ys = zip(*points)
         ax.plot(xs, ys, label=f"{run.name} ({run.short_commit()})", linewidth=1.8)
         plotted += 1
-    ax.set_xlabel(x)
+    ax.set_xlabel("step")
     ax.set_ylabel(metric)
     ax.grid(alpha=0.3)
     if plotted:

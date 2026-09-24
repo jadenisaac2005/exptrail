@@ -87,7 +87,7 @@ def cmd_plot(args) -> int:
 
     runs = _resolve(args.runs, args.root)
     out = Path(args.out or f"{args.metric}.png")
-    n = plot_runs(runs, args.metric, out, x=args.x)
+    n = plot_runs(runs, args.metric, out)
     if n == 0:
         print(f"error: no run has logged {args.metric!r}", file=sys.stderr)
         return 1
@@ -150,7 +150,6 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("plot", help="overlay a metric's curves to a PNG")
     s.add_argument("runs", nargs="+")
     s.add_argument("--metric", required=True)
-    s.add_argument("--x", default="step", help="x-axis column (step or elapsed)")
     s.add_argument("--out", "-o", help="output PNG (default: <metric>.png)")
     s.set_defaults(func=cmd_plot)
 

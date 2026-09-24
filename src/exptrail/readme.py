@@ -178,7 +178,7 @@ def verify_readme(readme: Path, strict: bool = False) -> VerifyResult:
             res.errors.append(f"{label}: run folder {link.group(2)} not found")
             continue
         run = SavedRun(path)
-        config, summary, meta = run.config, run.summary, run.meta
+        config, summary = run.config, run.summary
         if run.name != label:
             res.errors.append(f"{label}: run folder is named {run.name!r}")
         for key, cell in zip(header[1:-1], cells[1:-1]):
