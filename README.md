@@ -46,12 +46,14 @@ Each run writes `runs/<UTC timestamp>_<name>/` (override with `root=` or `$EXPTR
 | file | contents |
 |---|---|
 | `config.json` | the config you passed |
-| `metrics.csv` | one row per `log()` call: `step`, `elapsed`, your metrics |
+| `metrics.csv` | one row per `log()` call: `step`, then your metrics |
 | `summary.json` | final numbers, written on every `summary()` call |
-| `meta.json` | status (`running`/`finished`/`failed`/`interrupted`), git commit/branch/remote/dirty flag, Python + numpy/torch/sklearn versions, hostname, argv, cwd, seeds, start/end time |
+| `meta.json` | status (`running`/`finished`/`failed`/`interrupted`), git commit/branch/remote/dirty flag, Python + numpy/torch/scikit-learn versions, hostname, argv, cwd, seeds, start/end time |
 | `git_diff.patch` | uncommitted changes, only if the tree was dirty |
 | `traceback.txt` | only if the run raised |
 | `artifacts/` | anything passed to `save_artifact()` |
+
+Paths in `meta.json` (`cwd`, `python_executable`, `argv`, `git.root`) have your home directory replaced with `~`, so committed runs don't leak your username. Pass `Run(..., redact_paths=False)` to keep them verbatim. Credentials in the git remote URL are always stripped.
 
 A dirty working tree (modified *tracked* files; untracked files don't count) triggers a loud `DirtyTreeWarning`: that run's numbers can't be reproduced from a commit, so commit first if you plan to report them.
 
