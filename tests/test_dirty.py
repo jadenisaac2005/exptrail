@@ -313,3 +313,72 @@ def test_untracked_scan_failure_on_clean_tree_is_dirty(repo, monkeypatch):
     info = read_meta(run)
     assert info["dirty"] is True and info["untracked_scan"].startswith("failed")
     assert not (run.dir / "git_diff.patch").exists()
+
+
+def write_big(repo, name="big.py"):
+    big = ("x = 1\n" * 200_000).encode()  # 1.2 MB
+    (repo / name).write_bytes(big)
+    return big
+
+
+def test_hash_only_change_writes_no_patch(repo):
+    big = write_big(repo)
+    with pytest.warns(DirtyTreeWarning) as record:
+        with Run("hashonly") as run:
+            pass
+
+    message = str(record[0].message)
+    assert "recorded by sha256 in meta.json: big.py." in message
+    assert "git_diff.patch" not in message
+    assert not (run.dir / "git_diff.patch").exists()
+    info = read_meta(run)
+    assert info["dirty"] is True
+    assert "diff_file" not in info
+    assert info["dirty_files"] == {"tracked": [], "untracked": ["big.py"]}
+    assert info["untracked_too_large"] == [
+        {"path": "big.py", "size": len(big), "sha256": hashlib.sha256(big).hexdigest()}
+    ]
+
+
+def test_hashed_file_plus_tracked_change_patch_applies(repo, tmp_path_factory):
+    write_big(repo)
+    (repo / "train.py").write_text("print('changed')\n")
+    with pytest.warns(DirtyTreeWarning, match="recorded by sha256 in meta.json: big.py") as record:
+        with Run("hashplus") as run:
+            pass
+    assert "git_diff.patch" in str(record[0].message)
+    assert read_meta(run)["diff_file"] == "git_diff.patch"
+
+    clone = tmp_path_factory.mktemp("clone")
+    git(clone, "clone", "-q", str(repo), ".")
+    git(clone, "apply", str(run.dir / "git_diff.patch"))
+    assert (clone / "train.py").read_text() == "print('changed')\n"
+    assert not (clone / "big.py").exists()
+
+
+def test_dirty_warning_line_layout(repo, monkeypatch):
+    (repo / "train.py").write_text("print('changed')\n")
+    with pytest.warns(DirtyTreeWarning) as record:
+        with Run("layout"):
+            pass
+    lines = str(record[0].message).splitlines()
+    assert lines[1] == lines[-1] == "!" * 72
+    assert lines[2] == "exptrail: WORKING TREE IS DIRTY (train.py)"
+    assert lines[3].startswith("Run ")
+
+    real_git = meta_mod._git
+
+    def flaky_git(args, cwd, env=None, timeout=15):
+        if "ls-files" in args:
+            raise subprocess.TimeoutExpired(["git", *args], timeout)
+        return real_git(args, cwd, env, timeout)
+
+    monkeypatch.setattr(meta_mod, "_git", flaky_git)
+    with pytest.warns(DirtyTreeWarning) as record:
+        with Run("layout-failed"):
+            pass
+    lines = str(record[0].message).splitlines()
+    assert lines[2] == "exptrail: WORKING TREE IS DIRTY (train.py, untracked files unchecked)"
+    assert lines[3] == "Untracked files could not be checked (timed out after 60s), so"
+    assert lines[5].startswith("commit ") and lines[5].endswith(".")
+    assert lines[6].startswith("Tracked changes were saved to ")

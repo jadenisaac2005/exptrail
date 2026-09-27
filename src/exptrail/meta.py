@@ -294,11 +294,15 @@ def git_info(
         }
         if scan_error:
             info["untracked_scan"] = f"failed: {scan_error}"
-        if diff is None:
-            return info, None
-        info["changed_files"] = tracked + recorded_untracked
+        if tracked or recorded_untracked:
+            info["changed_files"] = tracked + recorded_untracked
         if hashed:
             info["untracked_too_large"] = hashed
+        if not diff:
+            # Nothing git can apply (e.g. the only change is a file recorded by
+            # hash): write no patch rather than one that `git apply` rejects.
+            return info, None
+        if hashed:
             note = [
                 "# exptrail: untracked files over the size limit "
                 f"({max_untracked_bytes} bytes) are recorded by hash, not included below:"

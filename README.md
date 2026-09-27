@@ -68,9 +68,9 @@ Run("momentum-lr0.01", dirty_ignore=["*.md", "submissions/**"],
 
 A pattern without `/` (`*.md`) matches that file name in any directory. A pattern with `/` (`submissions/**`) matches the path from the repo root, and a trailing `/` (`submissions/`) means everything under that folder.
 
-`git_diff.patch` includes untracked code files as new-file diffs, so `git apply git_diff.patch` on the recorded commit rebuilds the tree the run used. Your git index is never touched: the files are added to a temporary copy of it. Untracked files over 1 MB are recorded by path, size and sha256 (in the patch header and in `meta.json`) instead of being inlined.
+`git_diff.patch` includes untracked code files as new-file diffs, so `git apply git_diff.patch` on the recorded commit rebuilds the tree the run used. Your git index is never touched: the files are added to a temporary copy of it. Untracked files over 1 MB are recorded by path, size and sha256 in `meta.json` (and in the patch header, when there is a patch) instead of being inlined. If such a file is the only change, no `git_diff.patch` is written, since there would be nothing for `git apply` to apply.
 
-`meta.json` records what was found under `git`: `dirty_files` (`tracked` and `untracked` lists of the files that made the run dirty), `ignored_files` (changed files that matched `dirty_ignore`), `changed_files` (everything in the patch), `untracked_too_large` (hashed files, if any), and the `dirty_ignore`/`untracked_code` patterns that were in effect.
+`meta.json` records what was found under `git`: `dirty_files` (`tracked` and `untracked` lists of the files that made the run dirty), `ignored_files` (changed files that matched `dirty_ignore`), `changed_files` (every changed file that was recorded, in the patch or by hash), `untracked_too_large` (hashed files, if any), and the `dirty_ignore`/`untracked_code` patterns that were in effect.
 
 If listing untracked files fails (it times out after 60 s, e.g. on a huge un-ignored data folder or a repo on a network drive), the commit, branch and tracked changes are still recorded, `untracked_scan` says why the scan failed, and the run is treated as dirty because it can't be shown to be clean.
 

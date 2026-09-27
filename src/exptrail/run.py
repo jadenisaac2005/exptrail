@@ -200,23 +200,30 @@ class Run:
             files = ", ".join(names[:5]) + (f", +{len(names) - 5} more" if len(names) > 5 else "")
             bar = "!" * 72
             scan = git.get("untracked_scan", "")
+            patch = self.dir / "git_diff.patch"
+            hashed = ", ".join(h["path"] for h in git.get("untracked_too_large", []))
+            if hashed:
+                hashed = f"Too large to include, recorded by sha256 in meta.json: {hashed}.\n"
             if scan.startswith("failed"):
                 files = ", ".join(filter(None, [files, "untracked files unchecked"]))
-                saved = (
-                    f"Tracked changes were saved to {self.dir / 'git_diff.patch'}.\n"
-                    if git.get("diff_file") else ""
-                )
+                saved = f"Tracked changes were saved to {patch}.\n" if git.get("diff_file") else ""
                 message = (
                     f"Untracked files could not be checked ({scan[len('failed: '):]}), so\n"
                     f"run {self.dir.name} is treated as dirty: it can't be shown to match\n"
-                    f"commit {git['commit'][:10]}. {saved}"
+                    f"commit {git['commit'][:10]}.\n{saved}"
                     f"Gitignore large data folders so the scan finishes.\n"
+                )
+            elif git.get("diff_file"):
+                message = (
+                    f"Run {self.dir.name} used uncommitted code, so its numbers can't be\n"
+                    f"reproduced from commit {git['commit'][:10]}. The diff was saved to\n"
+                    f"{patch}. Commit first for a reportable result.\n{hashed}"
                 )
             else:
                 message = (
                     f"Run {self.dir.name} used uncommitted code, so its numbers can't be\n"
-                    f"reproduced from commit {git['commit'][:10]}. The diff was saved to\n"
-                    f"{self.dir / 'git_diff.patch'}. Commit first for a reportable result.\n"
+                    f"reproduced from commit {git['commit'][:10]}. Commit first for a\n"
+                    f"reportable result.\n{hashed}"
                 )
             warnings.warn(
                 f"\n{bar}\n"
