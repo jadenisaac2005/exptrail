@@ -2,6 +2,6 @@
 
 __version__ = "0.1.0"
 
-from .run import DirtyTreeWarning, NoGitWarning, Run, track  # noqa: E402
+from .run import ConfigWarning, DirtyTreeWarning, NoGitWarning, Run, track  # noqa: E402
 
-__all__ = ["Run", "track", "DirtyTreeWarning", "NoGitWarning", "__version__"]
+__all__ = ["Run", "track", "DirtyTreeWarning", "NoGitWarning", "ConfigWarning", "__version__"]

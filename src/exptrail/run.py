@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__
-from .meta import environment, git_info, redact_home
+from .meta import ConfigWarning, check_patterns, environment, git_info, redact_home  # noqa: F401
 
 
 class DirtyTreeWarning(UserWarning):
@@ -98,6 +98,13 @@ class Run:
         with Run("momentum-lr0.01", config={"lr": 0.01}) as run:
             run.log(step=epoch, train_loss=loss)
             run.summary(test_acc=0.98)
+
+    ``dirty_ignore`` lists glob patterns (``["*.md", "submissions/**"]``) whose
+    changes don't mark the run dirty; they are still saved to git_diff.patch.
+    ``untracked_code`` lists the patterns an untracked file must match to mark
+    the run dirty (default: ``*.py``, ``*.ipynb``, ``*.pyx``, ``*.yaml``,
+    ``*.yml``, ``*.toml``). Either one, when omitted, is read from
+    ``[tool.exptrail]`` in the repo's pyproject.toml (Python 3.11+).
     """
 
     def __init__(
@@ -109,6 +116,8 @@ class Run:
         root: str | os.PathLike | None = None,
         notes: str | None = None,
         redact_paths: bool = True,
+        dirty_ignore: list[str] | None = None,
+        untracked_code: list[str] | None = None,
     ):
         self.name = name
         self.config = dict(config or {})
@@ -116,6 +125,11 @@ class Run:
         self.seeds = seeds
         self.notes = notes
         self.redact_paths = redact_paths
+        # None means "not set here": fall back to pyproject.toml, then the defaults.
+        self.dirty_ignore = None if dirty_ignore is None else check_patterns("dirty_ignore", dirty_ignore)
+        self.untracked_code = (
+            None if untracked_code is None else check_patterns("untracked_code", untracked_code)
+        )
         self.root = Path(root) if root is not None else default_root()
         self.dir: Path | None = None
         self.meta: dict = {}
@@ -147,11 +161,11 @@ class Run:
         self.dir = candidate
         self._t0 = time.monotonic()
 
-        git, diff = git_info(Path.cwd())
+        git, diff = git_info(Path.cwd(), self.dirty_ignore, self.untracked_code, exclude=[self.root])
         if self.redact_paths and git.get("root"):
             git["root"] = redact_home(git["root"])
         if diff is not None:
-            (self.dir / "git_diff.patch").write_text(diff)
+            (self.dir / "git_diff.patch").write_text(diff, encoding="utf-8", errors="surrogateescape")
             git["diff_file"] = "git_diff.patch"
         self.meta = {
             "name": self.name,
@@ -181,14 +195,40 @@ class Run:
                 stacklevel=4,
             )
         elif git["dirty"]:
-            files = ", ".join(git.get("changed_files", [])[:5])
+            dirty = git["dirty_files"]
+            names = dirty["tracked"] + [f"{p} (untracked)" for p in dirty["untracked"]]
+            files = ", ".join(names[:5]) + (f", +{len(names) - 5} more" if len(names) > 5 else "")
             bar = "!" * 72
+            scan = git.get("untracked_scan", "")
+            patch = self.dir / "git_diff.patch"
+            hashed = ", ".join(h["path"] for h in git.get("untracked_too_large", []))
+            if hashed:
+                hashed = f"Too large to include, recorded by sha256 in meta.json: {hashed}.\n"
+            if scan.startswith("failed"):
+                files = ", ".join(filter(None, [files, "untracked files unchecked"]))
+                saved = f"Tracked changes were saved to {patch}.\n" if git.get("diff_file") else ""
+                message = (
+                    f"Untracked files could not be checked ({scan[len('failed: '):]}), so\n"
+                    f"run {self.dir.name} is treated as dirty: it can't be shown to match\n"
+                    f"commit {git['commit'][:10]}.\n{saved}"
+                    f"Gitignore large data folders so the scan finishes.\n"
+                )
+            elif git.get("diff_file"):
+                message = (
+                    f"Run {self.dir.name} used uncommitted code, so its numbers can't be\n"
+                    f"reproduced from commit {git['commit'][:10]}. The diff was saved to\n"
+                    f"{patch}. Commit first for a reportable result.\n{hashed}"
+                )
+            else:
+                message = (
+                    f"Run {self.dir.name} used uncommitted code, so its numbers can't be\n"
+                    f"reproduced from commit {git['commit'][:10]}. Commit first for a\n"
+                    f"reportable result.\n{hashed}"
+                )
             warnings.warn(
                 f"\n{bar}\n"
                 f"exptrail: WORKING TREE IS DIRTY ({files})\n"
-                f"Run {self.dir.name} used uncommitted code, so its numbers can't be\n"
-                f"reproduced from commit {git['commit'][:10]}. The diff was saved to\n"
-                f"{self.dir / 'git_diff.patch'}. Commit first for a reportable result.\n"
+                f"{message}"
                 f"{bar}",
                 DirtyTreeWarning,
                 stacklevel=4,
@@ -309,6 +349,8 @@ def track(
     seeds: Any = None,
     root: str | os.PathLike | None = None,
     redact_paths: bool = True,
+    dirty_ignore: list[str] | None = None,
+    untracked_code: list[str] | None = None,
 ):
     """Decorator form of :class:`Run`.
 
@@ -330,7 +372,8 @@ def track(
                 with_defaults.apply_defaults()
                 cfg = {k: v for k, v in with_defaults.arguments.items() if k != "run"}
             with Run(name or func.__name__, config=cfg, tags=tags, seeds=seeds, root=root,
-                     redact_paths=redact_paths) as run:
+                     redact_paths=redact_paths, dirty_ignore=dirty_ignore,
+                     untracked_code=untracked_code) as run:
                 if wants_run:
                     # Replace ``run`` wherever it was bound (positional or keyword).
                     bound.arguments["run"] = run
