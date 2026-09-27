@@ -16,6 +16,8 @@ import warnings
 from importlib import metadata
 from pathlib import Path
 
+from ._stack import user_stacklevel
+
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10
@@ -87,13 +89,14 @@ def _pyproject_settings(root: Path) -> dict:
                 f"exptrail: [tool.exptrail] in {path} is ignored on Python 3.10 "
                 "(no tomllib). Pass dirty_ignore=/untracked_code= to Run() instead.",
                 ConfigWarning,
-                stacklevel=5,  # the user's Run(...) line
+                stacklevel=user_stacklevel(),
             )
         return {}
     try:
         section = tomllib.loads(text).get("tool", {}).get("exptrail", {})
     except tomllib.TOMLDecodeError as exc:
-        warnings.warn(f"exptrail: could not parse {path}: {exc}", ConfigWarning, stacklevel=5)
+        warnings.warn(f"exptrail: could not parse {path}: {exc}", ConfigWarning,
+                      stacklevel=user_stacklevel())
         return {}
     out = {}
     for key in ("dirty_ignore", "untracked_code"):

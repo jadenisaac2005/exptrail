@@ -1,4 +1,4 @@
-"""Command-line interface: ls, show, compare, plot, table, verify."""
+"""Command-line interface: ls, show, compare, plot, table, verify, mark."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from .readme import render_table, verify_readme, write_table
-from .run import default_root
+from .run import END_STATUSES, _now, _write_json, default_root
 from .store import SavedRun, find_run, glob_runs, list_runs
 
 
@@ -44,7 +44,7 @@ def cmd_ls(args) -> int:
         summary = run.summary
         keys = args.metric or list(summary)[:3]
         metrics = ", ".join(f"{k}={_fmt(summary.get(k))}" for k in keys)
-        rows.append([run.id, run.status, metrics, run.short_commit()])
+        rows.append([run.id, run.status_display(), metrics, run.short_commit()])
     print_table(["run", "status", "summary", "commit"], rows)
     if any(r.dirty for r in runs):
         print("\n* = ran on a dirty working tree")
@@ -54,6 +54,7 @@ def cmd_ls(args) -> int:
 def cmd_show(args) -> int:
     run = find_run(args.run, args.root)
     print(f"# {run.id}  ({run.path})\n")
+    print(f"status: {run.status_display()}\n")
     for title, data in (("config", run.config), ("summary", run.summary), ("meta", run.meta)):
         print(f"## {title}")
         print(json.dumps(data, indent=2))
@@ -78,7 +79,7 @@ def cmd_compare(args) -> int:
     print("\n## summary")
     print_table(["metric", *ids], [[k, *(_fmt(s.get(k)) for s in summaries)] for k in mkeys])
     print("\n## provenance")
-    print_table(["", *ids], [["status", *(r.status for r in runs)], ["commit", *(r.short_commit() for r in runs)]])
+    print_table(["", *ids], [["status", *(r.status_display() for r in runs)], ["commit", *(r.short_commit() for r in runs)]])
     return 0
 
 
@@ -130,6 +131,21 @@ def cmd_verify(args) -> int:
     return 1 if failed else 0
 
 
+def cmd_mark(args) -> int:
+    run = find_run(args.run, args.root)
+    shown = run.status_display()
+    if run.status == "running" and not args.force:
+        print(f"error: {run.id} shows as {shown}; pass --force to mark it anyway", file=sys.stderr)
+        return 1
+    meta = run.read_json("meta.json")
+    previous = meta.get("status")
+    meta["status"] = args.status
+    meta["marked"] = {"by": "hand", "at": _now().isoformat(), "previous_status": previous, "shown_as": shown}
+    _write_json(run.path / "meta.json", meta)
+    print(f"marked {run.id} as {args.status} (was {shown})")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="exptrail", description=__doc__)
     p.add_argument("--root", type=Path, default=None, help="runs directory (default: $EXPTRAIL_ROOT or ./runs)")
@@ -167,8 +183,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("verify", help="check README results against saved runs")
     s.add_argument("readme", nargs="+")
-    s.add_argument("--strict", action="store_true", help="also fail on dirty, failed or git-less runs")
+    s.add_argument("--strict", action="store_true", help="also fail on dirty or git-less runs")
     s.set_defaults(func=cmd_verify)
+
+    s = sub.add_parser("mark", help="permanently record how a run ended (e.g. one that shows as dead)")
+    s.add_argument("run")
+    s.add_argument("status", choices=END_STATUSES)
+    s.add_argument("--force", action="store_true", help="mark it even if it still shows as running")
+    s.set_defaults(func=cmd_mark)
     return p
 
 

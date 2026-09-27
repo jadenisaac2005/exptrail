@@ -8,6 +8,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .liveness import Liveness, assess
+
 
 @dataclass
 class SavedRun:
@@ -48,8 +50,31 @@ class SavedRun:
         return self.meta.get("name", self.id)
 
     @property
-    def status(self) -> str:
+    def stored_status(self) -> str:
+        """The status as written in meta.json."""
         return self.meta.get("status", "unknown")
+
+    @property
+    def liveness(self) -> Liveness | None:
+        """For a stored ``running`` status, whether it really is. Re-assessed on every
+        access (never cached), so a long-lived SavedRun notices the job dying. Reads only."""
+        return assess(self.path, self.meta) if self.stored_status == "running" else None
+
+    @property
+    def status(self) -> str:
+        """Status worked out at read time: a ``running`` run may be ``dead`` or ``stale``."""
+        live = self.liveness
+        return live.status if live else self.stored_status
+
+    def status_display(self) -> str:
+        """Status with its evidence, e.g. ``stale (last heartbeat 14m ago)``."""
+        live = self.liveness
+        if live:
+            return live.display()
+        marked = self.meta.get("marked")
+        if isinstance(marked, dict) and marked.get("by") == "hand":
+            return f"{self.stored_status} (marked by hand)"
+        return self.stored_status
 
     @property
     def commit(self) -> str | None:

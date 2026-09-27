@@ -39,6 +39,16 @@ def train(lr=0.01, epochs=30, run=None):
     return {"test_acc": acc}
 ```
 
+If one `with` block doesn't fit your script (a notebook, a training loop spread over several functions), start and finish the run yourself:
+
+```python
+run = Run(name="momentum-lr0.01", config=cfg).start()
+...                                      # train, run.log(...), run.summary(...)
+run.finish()                             # or run.finish("failed"); calling it twice is harmless
+```
+
+`with Run(...)`, `@track` and `start()`/`finish()` share one code path. Wrap **the whole job**, data loading and evaluation included: `duration_s` only covers the run's own span, and anything that crashes outside it isn't recorded.
+
 Each run writes `runs/<UTC timestamp>_<name>/` (override with `root=` or `$EXPTRAIL_ROOT`):
 
 | file | contents |
@@ -46,7 +56,8 @@ Each run writes `runs/<UTC timestamp>_<name>/` (override with `root=` or `$EXPTR
 | `config.json` | the config you passed |
 | `metrics.csv` | one row per `log()` call: `step`, then your metrics |
 | `summary.json` | final numbers, written on every `summary()` call |
-| `meta.json` | status (`running`/`finished`/`failed`/`interrupted`), git commit/branch/remote/dirty flag (and which files set it), Python + numpy/torch/scikit-learn versions, hostname, argv, cwd, seeds, start/end time |
+| `meta.json` | status (see [Run status](#run-status)), git commit/branch/remote/dirty flag (and which files set it), Python + numpy/torch/scikit-learn versions, hostname, argv, cwd, seeds, start/end time, and a `liveness` record (hostname, pid, process start time, boot ID, heartbeat interval) |
+| `heartbeat` | touched every 30 s while the run is alive; removed when it finishes |
 | `git_diff.patch` | uncommitted changes (tracked edits plus new untracked code files), only if there were any |
 | `traceback.txt` | only if the run raised |
 | `artifacts/` | anything passed to `save_artifact()` |
@@ -84,6 +95,34 @@ untracked_code = ["*.py", "*.ipynb", "*.yaml"]
 
 Python 3.10 has no built-in TOML parser and exptrail has no dependencies, so on 3.10 a `[tool.exptrail]` section is ignored with a one-time `ConfigWarning`. Pass the keyword arguments instead.
 
+## Run status
+
+| status | meaning |
+|---|---|
+| `finished` | `finish()` was called, or the `with` block / `@track` function returned normally |
+| `failed` | an exception escaped the run; the traceback is in `traceback.txt` |
+| `interrupted` | Ctrl-C, SIGTERM, or the interpreter exited while the run was started but not finished (`status_reason` says which) |
+| `running` | still going, as far as the evidence shows |
+| `dead` | certainly gone: the process was killed (SIGKILL, the OOM killer), the pid now belongs to another process, or the machine has rebooted |
+| `stale` | probably gone: no heartbeat for a while |
+
+The usual ways ML jobs die (SIGKILL, the out-of-memory killer, a Colab disconnect, a laptop losing power) run no cleanup code, so nothing can write "died" into `meta.json`. Instead, a run records who it is when it starts (hostname, boot ID, pid, process start time) and a background thread touches its `heartbeat` file every 30 seconds, whether or not you call `log()`. `ls`, `show`, `compare` and `verify` turn a stored `running` into one of the statuses above when they read the run, and they never write to the run folder:
+
+- **On the machine the run started on**, the answer is certain: the process is alive (`running`) or it isn't (`dead (pid gone)`, `dead (pid reused)`, `dead (machine rebooted)`).
+- **From another machine** (a run folder on a shared drive, or synced back from a cluster), or where the process can't be inspected (Windows, runs from older exptrail versions), only the heartbeat's age is available. If it is older than 3 heartbeat intervals the run shows as `stale (last heartbeat 14m ago)`. That is only *probable*: the other machine may be alive but cut off from the shared drive, or its clock may disagree with yours.
+
+Heartbeat age is the `heartbeat` file's modification time (mtime). Copying a run folder resets it: `git clone` and `git checkout`, `cp` without `-p`, and cloud sync (Google Drive, Dropbox) all give the file a fresh mtime. So a crashed run folder that was copied or committed and then read on another machine can show as `running (on gpu-1, last heartbeat 5s ago)` for a few minutes, until the copied heartbeat goes stale. `verify` still fails such a run, because its status isn't `finished`.
+
+Change the heartbeat interval with `Run(..., heartbeat_s=60)` or `$EXPTRAIL_HEARTBEAT_S`, and the staleness threshold with `$EXPTRAIL_STALE_S` (seconds). On SIGTERM a run is marked `interrupted` before the process exits as it normally would; exptrail only installs its handler when there isn't one already, and restores the previous handler at `finish()`.
+
+To make a `dead` or `stale` status permanent, record what happened by hand:
+
+```bash
+exptrail mark momentum-lr0.01 interrupted     # or failed / finished; notes that it was marked by hand, and when
+```
+
+`mark` refuses a run that still shows as `running` unless you pass `--force`.
+
 ## CLI
 
 ```bash
@@ -93,13 +132,14 @@ exptrail compare sgd-lr0.1 momentum-lr0.01    # config diff + metric table
 exptrail plot sgd-lr0.1 momentum-lr0.01 --metric val_acc -o val_acc.png
 exptrail table --metric test_acc --runs '*digits*' --readme README.md
 exptrail verify README.md                     # non-zero exit on any mismatch
+exptrail mark momentum-lr0.01 interrupted     # make a dead/stale status permanent
 ```
 
 Runs can be referred to by folder name, path, run name (latest wins) or a unique substring. `--root DIR` points any command at another runs directory.
 
 **`table`** writes a markdown table between `<!-- results:start -->` and `<!-- results:end -->` marker lines (appended if the markers aren't there yet). Markers only count when each is on a line of its own, and there must be exactly one pair. Each row links to the run folder and commit. Re-running it replaces the block; it never duplicates it. Add columns with repeatable `--metric` and `--config` flags. Floats are shown to `--precision` decimals (default 4). Only finished runs are included unless you pass `--include-failed`. Links to run folders are relative to the README; pass `--absolute-links` to link them on GitHub/GitLab instead (needed for a README shown on PyPI, which can't resolve relative links).
 
-**`verify`** re-reads every run linked from the block. It fails if a displayed metric doesn't match `summary.json` at the displayed precision, if a config value doesn't exactly match `config.json`, if the commit differs from `meta.json`, or if a linked run folder is missing. Runs that were dirty, failed or git-less produce warnings, and `--strict` turns them into failures. Put it in CI:
+**`verify`** re-reads every run linked from the block. It fails if a displayed metric doesn't match `summary.json` at the displayed precision, if a config value doesn't exactly match `config.json`, if the commit differs from `meta.json`, if a linked run folder is missing, or if a linked run isn't `finished` (running, dead, stale, failed or interrupted; the message shows the status). Runs that were dirty or git-less produce warnings, and `--strict` turns them into failures. Put it in CI:
 
 ```yaml
 - run: pip install exptrail && exptrail verify README.md

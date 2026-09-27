@@ -280,9 +280,9 @@ def verify_readme(readme: Path, strict: bool = False) -> VerifyResult:
                 res.errors.append(f"{label}: commit shows {shown} but meta.json has {commit[:7]}")
         elif shown != "no-git":
             res.errors.append(f"{label}: commit shows {shown} but run has no git info")
+        if run.status != "finished":  # running, dead, stale, failed, interrupted: never reportable
+            res.errors.append(f"{label}: status is {run.status_display()}, not finished")
         problems = []
-        if run.status != "finished":
-            problems.append(f"status is {run.status}")
         if run.dirty:
             problems.append("ran on a dirty working tree")
         if not commit:
