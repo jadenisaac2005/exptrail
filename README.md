@@ -111,6 +111,8 @@ The usual ways ML jobs die (SIGKILL, the out-of-memory killer, a Colab disconnec
 - **On the machine the run started on**, the answer is certain: the process is alive (`running`) or it isn't (`dead (pid gone)`, `dead (pid reused)`, `dead (machine rebooted)`).
 - **From another machine** (a run folder on a shared drive, or synced back from a cluster), or where the process can't be inspected (Windows, runs from older exptrail versions), only the heartbeat's age is available. If it is older than 3 heartbeat intervals the run shows as `stale (last heartbeat 14m ago)`. That is only *probable*: the other machine may be alive but cut off from the shared drive, or its clock may disagree with yours.
 
+Heartbeat age is the `heartbeat` file's modification time (mtime). Copying a run folder resets it: `git clone` and `git checkout`, `cp` without `-p`, and cloud sync (Google Drive, Dropbox) all give the file a fresh mtime. So a crashed run folder that was copied or committed and then read on another machine can show as `running (on gpu-1, last heartbeat 5s ago)` for a few minutes, until the copied heartbeat goes stale. `verify` still fails such a run, because its status isn't `finished`.
+
 Change the heartbeat interval with `Run(..., heartbeat_s=60)` or `$EXPTRAIL_HEARTBEAT_S`, and the staleness threshold with `$EXPTRAIL_STALE_S` (seconds). On SIGTERM a run is marked `interrupted` before the process exits as it normally would; exptrail only installs its handler when there isn't one already, and restores the previous handler at `finish()`.
 
 To make a `dead` or `stale` status permanent, record what happened by hand:

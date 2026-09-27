@@ -181,7 +181,10 @@ class Heartbeat:
     def stop(self) -> None:
         self._stop.set()
         if self._thread is not None and self._thread is not threading.current_thread():
-            self._thread.join()
+            # os.utime can block for a long time on a network or FUSE mount (Google
+            # Drive on Colab). Never hang finish() on it: the thread is a daemon, so
+            # abandoning it is safe, and it exits once the pending utime returns.
+            self._thread.join(timeout=min(self.interval, 5.0))
         self._thread = None
 
 

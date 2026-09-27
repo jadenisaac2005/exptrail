@@ -248,6 +248,32 @@ def test_heartbeat_beats_without_log_calls(workdir, quiet):
     run.finish()
 
 
+def test_finish_does_not_hang_on_blocked_utime(workdir, quiet, monkeypatch):
+    """A heartbeat stuck in os.utime (slow network mount) must not block finish()."""
+    run = Run("blocked", heartbeat_s=0.05).start()
+    entered, release = threading.Event(), threading.Event()
+    real_utime = os.utime
+
+    def slow_utime(path, *args, **kwargs):
+        if Path(path).name == "heartbeat":
+            entered.set()
+            release.wait(30)
+        return real_utime(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "utime", slow_utime)
+    try:
+        assert entered.wait(10)  # the heartbeat thread is now stuck
+        t0 = time.monotonic()
+        run.finish()
+        assert time.monotonic() - t0 < 2  # joined with a timeout of min(interval, 5)
+        assert meta_of(run.dir)["status"] == "finished"
+    finally:
+        release.set()
+    for t in heartbeat_threads():  # the abandoned daemon exits once utime returns
+        t.join(10)
+    assert not heartbeat_threads()
+
+
 def test_long_silent_run_stays_running(workdir):
     """80 minutes without a single log() call: the heartbeat alone keeps it running."""
     run_dir = fake_run(workdir / "runs", "silent", remote(heartbeat_s=30), heartbeat_age=0)
