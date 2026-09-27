@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import csv
 import functools
 import inspect
@@ -10,6 +11,8 @@ import math
 import os
 import re
 import shutil
+import signal
+import threading
 import time
 import traceback
 import warnings
@@ -18,7 +21,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__
+from ._stack import user_stacklevel
+from .liveness import HEARTBEAT_FILE, Heartbeat, heartbeat_interval, record
 from .meta import ConfigWarning, check_patterns, environment, git_info, redact_home  # noqa: F401
+
+END_STATUSES = ("finished", "failed", "interrupted")
 
 
 class DirtyTreeWarning(UserWarning):
@@ -99,6 +106,13 @@ class Run:
             run.log(step=epoch, train_loss=loss)
             run.summary(test_acc=0.98)
 
+    or, when one ``with`` block doesn't fit the script, call ``run.start()``
+    and ``run.finish()`` yourself. If the interpreter exits in between, the
+    run is marked ``interrupted``; if the process is killed outright, readers
+    work out that it is ``dead`` or ``stale`` from its liveness record and the
+    ``heartbeat`` file, touched every ``heartbeat_s`` seconds (default
+    ``$EXPTRAIL_HEARTBEAT_S`` or 30).
+
     ``dirty_ignore`` lists glob patterns (``["*.md", "submissions/**"]``) whose
     changes don't mark the run dirty; they are still saved to git_diff.patch.
     ``untracked_code`` lists the patterns an untracked file must match to mark
@@ -118,6 +132,7 @@ class Run:
         redact_paths: bool = True,
         dirty_ignore: list[str] | None = None,
         untracked_code: list[str] | None = None,
+        heartbeat_s: float | None = None,
     ):
         self.name = name
         self.config = dict(config or {})
@@ -139,6 +154,12 @@ class Run:
         self._writer = None
         self._auto_step = 0
         self._t0 = 0.0
+        self.heartbeat_s = heartbeat_interval(heartbeat_s)
+        self._heartbeat: Heartbeat | None = None
+        self._finished = False
+        self._owner_pid: int | None = None
+        self._sigterm_handler = None
+        self._prev_sigterm = None
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -179,20 +200,64 @@ class Run:
             "git": git,
             **environment(self.redact_paths),
             "exptrail_version": __version__,
+            "liveness": record(self.heartbeat_s),
         }
+        self._owner_pid = os.getpid()
+        self._heartbeat = Heartbeat(self.dir / HEARTBEAT_FILE, self.heartbeat_s)
+        self._heartbeat.start()
         _write_json(self.dir / "config.json", self.config)
         _write_json(self.dir / "meta.json", self.meta)
         _write_json(self.dir / "summary.json", self._summary)
         self._expand_columns(self.dir / "metrics.csv", ["step"])  # exists even if log() is never called
+        self._install_sigterm()
+        atexit.register(self._at_exit)
         self._warn_about_git(git)
         return self
+
+    def _install_sigterm(self) -> None:
+        """Mark the run interrupted on SIGTERM, but only if nobody else handles it."""
+        if threading.current_thread() is not threading.main_thread():
+            return
+        try:
+            if signal.getsignal(signal.SIGTERM) is not signal.SIG_DFL:
+                return  # never override a user's (or framework's) handler
+            handler = self._on_sigterm
+            self._prev_sigterm = signal.signal(signal.SIGTERM, handler)
+            self._sigterm_handler = handler
+        except (AttributeError, ValueError, OSError):
+            pass
+
+    def _restore_sigterm(self) -> None:
+        if self._sigterm_handler is None:
+            return
+        try:
+            if threading.current_thread() is threading.main_thread() and \
+                    signal.getsignal(signal.SIGTERM) == self._sigterm_handler:
+                signal.signal(signal.SIGTERM, self._prev_sigterm)
+        except (ValueError, OSError):
+            pass
+        self._sigterm_handler = None
+
+    def _on_sigterm(self, signum, frame) -> None:
+        if os.getpid() == self._owner_pid:  # a forked child inherits the handler, not the run
+            self.finish("interrupted", reason="SIGTERM")
+        # then die exactly as if we had never been installed
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    def _at_exit(self) -> None:
+        if not self._finished and os.getpid() == self._owner_pid:
+            try:
+                self.finish("interrupted", reason="exited without finish()")
+            except OSError:
+                pass  # run folder deleted or unwritable: nothing left to record into
 
     def _warn_about_git(self, git: dict) -> None:
         if not git.get("available"):
             warnings.warn(
                 f"exptrail: {git['reason']}; run {self.dir.name} is not tied to a commit.",
                 NoGitWarning,
-                stacklevel=4,
+                stacklevel=user_stacklevel(),
             )
         elif git["dirty"]:
             dirty = git["dirty_files"]
@@ -231,26 +296,45 @@ class Run:
                 f"{message}"
                 f"{bar}",
                 DirtyTreeWarning,
-                stacklevel=4,
+                stacklevel=user_stacklevel(),
             )
 
-    def finish(self, status: str = "finished", error: str | None = None) -> None:
+    def finish(self, status: str = "finished", error: str | None = None, *, reason: str | None = None) -> None:
+        """Record how the run ended. Safe to call more than once: only the first call counts."""
         if self.dir is None:
             raise RuntimeError("run was never started")
-        if self._csv_file is not None:
-            self._csv_file.close()
-            self._csv_file = None
-        if error is not None:
-            (self.dir / "traceback.txt").write_text(error)
-            self.meta["error"] = error.strip().splitlines()[-1] if error.strip() else ""
-        ended = _now()
-        self.meta.update(
-            status=status,
-            end_time=ended.isoformat(),
-            duration_s=round(time.monotonic() - self._t0, 3),
-        )
-        _write_json(self.dir / "summary.json", self._summary)
-        _write_json(self.dir / "meta.json", self.meta)
+        if status not in END_STATUSES:
+            raise ValueError(f"status must be one of {', '.join(END_STATUSES)}, got {status!r}")
+        if self._finished:
+            return
+        self._finished = True
+        try:
+            if self._heartbeat is not None:
+                self._heartbeat.stop()
+                self._heartbeat = None
+            if self._csv_file is not None:
+                self._csv_file.close()
+                self._csv_file = None
+            if error is not None:
+                (self.dir / "traceback.txt").write_text(error)
+                self.meta["error"] = error.strip().splitlines()[-1] if error.strip() else ""
+            ended = _now()
+            self.meta.update(
+                status=status,
+                end_time=ended.isoformat(),
+                duration_s=round(time.monotonic() - self._t0, 3),
+            )
+            if reason:
+                self.meta["status_reason"] = reason
+            _write_json(self.dir / "summary.json", self._summary)
+            _write_json(self.dir / "meta.json", self.meta)
+            try:
+                (self.dir / HEARTBEAT_FILE).unlink()  # only meaningful while running
+            except OSError:
+                pass
+        finally:
+            self._restore_sigterm()
+            atexit.unregister(self._at_exit)
 
     def __enter__(self) -> "Run":
         return self.start()
@@ -273,6 +357,8 @@ class Run:
     def log(self, step: int | None = None, **metrics: Any) -> None:
         """Append one row to metrics.csv and flush it to disk immediately."""
         run_dir = self._require_started()
+        if self._finished:
+            raise RuntimeError(f"run {run_dir.name} already finished; log() before finish()")
         if step is None:
             step = self._auto_step
         self._auto_step = int(step) + 1
@@ -351,6 +437,7 @@ def track(
     redact_paths: bool = True,
     dirty_ignore: list[str] | None = None,
     untracked_code: list[str] | None = None,
+    heartbeat_s: float | None = None,
 ):
     """Decorator form of :class:`Run`.
 
@@ -373,7 +460,7 @@ def track(
                 cfg = {k: v for k, v in with_defaults.arguments.items() if k != "run"}
             with Run(name or func.__name__, config=cfg, tags=tags, seeds=seeds, root=root,
                      redact_paths=redact_paths, dirty_ignore=dirty_ignore,
-                     untracked_code=untracked_code) as run:
+                     untracked_code=untracked_code, heartbeat_s=heartbeat_s) as run:
                 if wants_run:
                     # Replace ``run`` wherever it was bound (positional or keyword).
                     bound.arguments["run"] = run
