@@ -15,11 +15,13 @@ from pathlib import Path
 
 import pytest
 
-from exptrail import NoGitWarning, Run, liveness, track
+from exptrail import ConfigWarning, NoGitWarning, Run, liveness, track
 from exptrail.cli import main
 from exptrail.liveness import assess, boot_id, process_start_time
 from exptrail.readme import render_table, write_table
 from exptrail.store import SavedRun
+
+from .conftest import git
 
 posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX signals and pids")
 needs_identity = pytest.mark.skipif(
@@ -511,34 +513,56 @@ def test_verify_fails_on_unfinished_stored_status(workdir, capsys, status):
 
 # -- warnings point at the user's line ----------------------------------------
 
-def _one_warning(record):
-    ours = [w for w in record if issubclass(w.category, NoGitWarning)]
+@pytest.fixture(params=["NoGitWarning", "ConfigWarning-py310", "ConfigWarning-parse"])
+def user_warning(request, workdir, monkeypatch):
+    """Set up cwd so that starting a run raises exactly one warning of the returned kind."""
+    if request.param == "NoGitWarning":
+        return NoGitWarning
+    from exptrail import meta as meta_mod
+
+    if request.param == "ConfigWarning-py310":
+        pyproject = '[tool.exptrail]\ndirty_ignore = ["*.md"]\n'
+        monkeypatch.setattr(meta_mod, "tomllib", None)  # the Python 3.10 path, on any version
+        monkeypatch.setattr(meta_mod, "_warned_no_tomllib", False)
+    else:
+        if meta_mod.tomllib is None:
+            pytest.skip("needs tomllib (Python 3.11+)")
+        pyproject = "[tool.exptrail\n"
+    (workdir / "pyproject.toml").write_text(pyproject)
+    git(workdir, "init", "-q")
+    git(workdir, "add", ".")
+    git(workdir, "commit", "-qm", "init")
+    return ConfigWarning
+
+
+def _one_warning(record, category):
+    ours = [w for w in record if issubclass(w.category, category)]
     assert len(ours) == 1, [str(w.message) for w in record]
     return ours[0]
 
 
-def test_warning_points_at_with_line(workdir):
+def test_warning_points_at_with_line(user_warning):
     with warnings.catch_warnings(record=True) as record:
         warnings.simplefilter("always")
         line = sys._getframe().f_lineno + 1
         with Run("w"):
             pass
-    w = _one_warning(record)
+    w = _one_warning(record, user_warning)
     assert (w.filename, w.lineno) == (__file__, line)
 
 
-def test_warning_points_at_start_line(workdir):
+def test_warning_points_at_start_line(user_warning):
     with warnings.catch_warnings(record=True) as record:
         warnings.simplefilter("always")
         run = Run("s")
         line = sys._getframe().f_lineno + 1
         run.start()
         run.finish()
-    w = _one_warning(record)
+    w = _one_warning(record, user_warning)
     assert (w.filename, w.lineno) == (__file__, line)
 
 
-def test_warning_points_at_track_call(workdir):
+def test_warning_points_at_track_call(user_warning):
     @track
     def train():
         return {"acc": 1.0}
@@ -547,5 +571,5 @@ def test_warning_points_at_track_call(workdir):
         warnings.simplefilter("always")
         line = sys._getframe().f_lineno + 1
         train()
-    w = _one_warning(record)
+    w = _one_warning(record, user_warning)
     assert (w.filename, w.lineno) == (__file__, line)
