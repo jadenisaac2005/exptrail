@@ -46,14 +46,41 @@ Each run writes `runs/<UTC timestamp>_<name>/` (override with `root=` or `$EXPTR
 | `config.json` | the config you passed |
 | `metrics.csv` | one row per `log()` call: `step`, then your metrics |
 | `summary.json` | final numbers, written on every `summary()` call |
-| `meta.json` | status (`running`/`finished`/`failed`/`interrupted`), git commit/branch/remote/dirty flag, Python + numpy/torch/scikit-learn versions, hostname, argv, cwd, seeds, start/end time |
-| `git_diff.patch` | uncommitted changes, only if the tree was dirty |
+| `meta.json` | status (`running`/`finished`/`failed`/`interrupted`), git commit/branch/remote/dirty flag (and which files set it), Python + numpy/torch/scikit-learn versions, hostname, argv, cwd, seeds, start/end time |
+| `git_diff.patch` | uncommitted changes (tracked edits plus new untracked code files), only if there were any |
 | `traceback.txt` | only if the run raised |
 | `artifacts/` | anything passed to `save_artifact()` |
 
 Paths in `meta.json` (`cwd`, `python_executable`, `argv`, `git.root`) have your home directory replaced with `~`, so committed runs don't leak your username. Pass `Run(..., redact_paths=False)` to keep them verbatim. Credentials in the git remote URL are always stripped.
 
-A dirty working tree (modified *tracked* files; untracked files don't count) triggers a loud `DirtyTreeWarning`: that run's numbers can't be reproduced from a commit, so commit first if you plan to report them.
+A dirty working tree triggers a loud `DirtyTreeWarning`: that run's numbers can't be reproduced from a commit, so commit first if you plan to report them.
+
+### What counts as dirty
+
+- **Modified tracked files** make a run dirty, unless they match `dirty_ignore`.
+- **Untracked files** make a run dirty only if they look like code, i.e. match `untracked_code`. The default patterns are `*.py`, `*.ipynb`, `*.pyx`, `*.yaml`, `*.yml` and `*.toml`. Other untracked files (CSVs, logs, model outputs, the `runs/` folder) are ignored entirely. Files your `.gitignore` excludes never count, and neither does anything inside a virtualenv (a folder containing `pyvenv.cfg`).
+- **`dirty_ignore`** lists glob patterns for changes that shouldn't mark a run dirty, such as a results log you edit by hand. Those changes don't set the flag, don't warn, and don't fail `verify --strict`, but they are still written to `git_diff.patch`, so the record stays complete.
+
+```python
+Run("momentum-lr0.01", dirty_ignore=["*.md", "submissions/**"],
+    untracked_code=["*.py", "*.yaml"])      # replaces the default code patterns
+```
+
+A pattern without `/` (`*.md`) matches that file name in any directory. A pattern with `/` (`submissions/**`) matches the path from the repo root, and a trailing `/` (`submissions/`) means everything under that folder.
+
+`git_diff.patch` includes untracked code files as new-file diffs, so `git apply git_diff.patch` on the recorded commit rebuilds the tree the run used. Your git index is never touched: the files are added to a temporary copy of it. Untracked files over 1 MB are recorded by path, size and sha256 (in the patch header and in `meta.json`) instead of being inlined.
+
+`meta.json` records what was found under `git`: `dirty_files` (`tracked` and `untracked` lists of the files that made the run dirty), `ignored_files` (changed files that matched `dirty_ignore`), `changed_files` (everything in the patch), `untracked_too_large` (hashed files, if any), and the `dirty_ignore`/`untracked_code` patterns that were in effect.
+
+On Python 3.11+ you can set the same keys once for the whole repo in `pyproject.toml`. Keyword arguments override it:
+
+```toml
+[tool.exptrail]
+dirty_ignore = ["*.md", "submissions/**"]
+untracked_code = ["*.py", "*.ipynb", "*.yaml"]
+```
+
+Python 3.10 has no built-in TOML parser and exptrail has no dependencies, so on 3.10 a `[tool.exptrail]` section is ignored with a one-time `ConfigWarning`. Pass the keyword arguments instead.
 
 ## CLI
 
