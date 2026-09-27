@@ -72,6 +72,8 @@ A pattern without `/` (`*.md`) matches that file name in any directory. A patter
 
 `meta.json` records what was found under `git`: `dirty_files` (`tracked` and `untracked` lists of the files that made the run dirty), `ignored_files` (changed files that matched `dirty_ignore`), `changed_files` (everything in the patch), `untracked_too_large` (hashed files, if any), and the `dirty_ignore`/`untracked_code` patterns that were in effect.
 
+If listing untracked files fails (it times out after 60 s, e.g. on a huge un-ignored data folder or a repo on a network drive), the commit, branch and tracked changes are still recorded, `untracked_scan` says why the scan failed, and the run is treated as dirty because it can't be shown to be clean.
+
 On Python 3.11+ you can set the same keys once for the whole repo in `pyproject.toml`. Keyword arguments override it:
 
 ```toml

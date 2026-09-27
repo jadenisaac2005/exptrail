@@ -265,3 +265,51 @@ def test_patch_survives_non_utf8_content(repo):
     assert b"+s = '\xe9'" in (run.dir / "git_diff.patch").read_bytes()
     subprocess.run(["git", "apply", "--check", "-R", str(run.dir / "git_diff.patch")],
                    cwd=repo, check=True)
+
+
+def test_untracked_scan_failure_keeps_git_info(repo, monkeypatch):
+    real_git = meta_mod._git
+    timeouts = []
+
+    def flaky_git(args, cwd, env=None, timeout=15):
+        if "ls-files" in args:
+            timeouts.append(timeout)
+            raise subprocess.TimeoutExpired(["git", *args], timeout)
+        return real_git(args, cwd, env, timeout)
+
+    monkeypatch.setattr(meta_mod, "_git", flaky_git)
+    (repo / "train.py").write_text("print('changed')\n")
+    (repo / "newmod.py").write_text("x = 1\n")
+
+    with pytest.warns(DirtyTreeWarning, match=r"(?s)untracked files unchecked.*could not be checked"):
+        with Run("slowscan") as run:
+            pass
+
+    assert timeouts == [60]
+    info = read_meta(run)
+    assert info["available"] is True
+    assert info["commit"] == git(repo, "rev-parse", "HEAD")
+    assert info["branch"] and info["remote"] == "https://github.com/me/proj.git"
+    assert info["dirty"] is True
+    assert info["untracked_scan"] == "failed: timed out after 60s"
+    assert info["dirty_files"] == {"tracked": ["train.py"], "untracked": []}
+    patch = patch_of(run)  # tracked-only patch is kept
+    assert "+print('changed')" in patch and "newmod" not in patch
+
+
+def test_untracked_scan_failure_on_clean_tree_is_dirty(repo, monkeypatch):
+    real_git = meta_mod._git
+
+    def flaky_git(args, cwd, env=None, timeout=15):
+        if "ls-files" in args:
+            raise subprocess.TimeoutExpired(["git", *args], timeout)
+        return real_git(args, cwd, env, timeout)
+
+    monkeypatch.setattr(meta_mod, "_git", flaky_git)
+    with pytest.warns(DirtyTreeWarning, match="could not be checked") as record:
+        with Run("slowscan-clean") as run:
+            pass
+    assert "saved to" not in str(record[0].message)
+    info = read_meta(run)
+    assert info["dirty"] is True and info["untracked_scan"].startswith("failed")
+    assert not (run.dir / "git_diff.patch").exists()

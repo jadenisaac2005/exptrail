@@ -24,14 +24,16 @@ except ModuleNotFoundError:  # Python 3.10
 TRACKED_PACKAGES = ("numpy", "torch", "scikit-learn")
 
 
-def _git(args: list[str], cwd: Path, env: dict | None = None) -> subprocess.CompletedProcess:
+def _git(
+    args: list[str], cwd: Path, env: dict | None = None, timeout: float = 15
+) -> subprocess.CompletedProcess:
     # --no-optional-locks: never let a read opportunistically rewrite the user's index.
     # --literal-pathspecs: a file called `data[1].py` is a path, not a glob.
     # surrogateescape keeps non-UTF-8 bytes in a diff intact through str.
     return subprocess.run(
         ["git", "--no-optional-locks", "--literal-pathspecs", *args],
         cwd=cwd, capture_output=True, text=True, encoding="utf-8",
-        errors="surrogateescape", timeout=15, env=env,
+        errors="surrogateescape", timeout=timeout, env=env,
     )
 
 
@@ -52,6 +54,9 @@ def _clean_remote(url: str) -> str:
 
 DEFAULT_UNTRACKED_CODE = ("*.py", "*.ipynb", "*.pyx", "*.yaml", "*.yml", "*.toml")
 MAX_UNTRACKED_BYTES = 1_000_000
+# Listing untracked files walks the whole work tree, which can be slow with a big
+# un-ignored data folder or a repo on a network drive (Colab + Google Drive).
+UNTRACKED_SCAN_TIMEOUT = 60
 
 
 class ConfigWarning(UserWarning):
@@ -141,7 +146,7 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def _diff_with_untracked(top: Path, untracked: list[str]) -> str:
+def _diff_with_untracked(top: Path, untracked: list[str], timeout: float) -> str:
     """``git diff HEAD`` plus ``untracked`` shown as new files.
 
     The untracked files are marked intent-to-add in a throwaway copy of the
@@ -149,7 +154,7 @@ def _diff_with_untracked(top: Path, untracked: list[str]) -> str:
     """
     if not untracked:
         return _git(["diff", "HEAD", "--binary"], top).stdout
-    index = _git(["rev-parse", "--git-path", "index"], top).stdout.strip()
+    index = _git(["rev-parse", "--git-path", "index"], top, timeout=timeout).stdout.strip()
     index_path = top / index  # absolute paths survive the join unchanged
     with tempfile.TemporaryDirectory(prefix="exptrail-") as tmp:
         tmp_index = Path(tmp) / "index"
@@ -157,13 +162,48 @@ def _diff_with_untracked(top: Path, untracked: list[str]) -> str:
         if index_path.is_file():
             shutil.copyfile(index_path, tmp_index)
         else:
-            _git(["read-tree", "HEAD"], top, env)
-        added = _git(["add", "--intent-to-add", "--", *untracked], top, env)
-        diff = _git(["diff", "HEAD", "--binary"], top, env).stdout
+            _git(["read-tree", "HEAD"], top, env, timeout)
+        added = _git(["add", "--intent-to-add", "--", *untracked], top, env, timeout)
+        diff = _git(["diff", "HEAD", "--binary"], top, env, timeout).stdout
     if added.returncode != 0:
         reason = " ".join(added.stderr.split())
         diff = f"# exptrail: could not include untracked files in this patch: {reason}\n" + diff
     return diff
+
+
+def _scan_untracked(
+    root: Path, patterns: list[str], skip: list[str], max_bytes: int, timeout: float
+) -> tuple[list[str], list[dict]]:
+    """Untracked code files: (paths to inline in the patch, [{path, size, sha256}] too big to inline)."""
+    out = _git(["ls-files", "--others", "--exclude-standard", "-z"], root, timeout=timeout)
+    if out.returncode != 0:
+        raise subprocess.CalledProcessError(out.returncode, "git ls-files", stderr=out.stderr)
+    venv_cache: dict = {}
+    inline, hashed = [], []
+    for p in _split_z(out.stdout):
+        if (
+            not _matches(p, patterns)
+            or any(p.startswith(d) for d in skip)
+            or _in_virtualenv(p, root, venv_cache)
+        ):
+            continue
+        f = root / p
+        if not f.is_file():  # a symlink to a directory, a socket, ...
+            continue
+        size = f.stat().st_size
+        if size > max_bytes:
+            hashed.append({"path": p, "size": size, "sha256": _sha256(f)})
+        else:
+            inline.append(p)
+    return inline, hashed
+
+
+def _describe_failure(exc: BaseException) -> str:
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return f"timed out after {exc.timeout:g}s"
+    if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+        return f"git exited with {exc.returncode}: {' '.join(exc.stderr.split())}"
+    return str(exc) or type(exc).__name__
 
 
 def git_info(
@@ -184,6 +224,11 @@ def git_info(
     ``dirty_ignore``/``untracked_code`` of None fall back to ``[tool.exptrail]``
     in the repo's pyproject.toml, then to the defaults. Untracked files under
     an ``exclude`` directory (the runs folder, with its saved artifacts) never count.
+
+    If the untracked scan fails (e.g. times out on a huge work tree), the
+    commit and tracked-file info are kept, the patch holds tracked changes only,
+    ``untracked_scan`` says why, and the run counts as dirty since it can't be
+    shown to be clean.
     """
     if dirty_ignore is not None:
         dirty_ignore = check_patterns("dirty_ignore", dirty_ignore)
@@ -213,23 +258,20 @@ def git_info(
                 skip.append(Path(d).resolve().relative_to(root.resolve()).as_posix() + "/")
             except ValueError:  # outside the repo
                 pass
-        venv_cache: dict = {}
-        untracked = [
-            p for p in _split_z(_git(["ls-files", "--others", "--exclude-standard", "-z"], root).stdout)
-            if _matches(p, untracked_code)
-            and not any(p.startswith(d) for d in skip)
-            and not _in_virtualenv(p, root, venv_cache)
-        ]
-        inline, hashed = [], []
-        for p in untracked:
-            f = root / p
-            if not f.is_file():  # a symlink to a directory, a socket, ...
-                continue
-            size = f.stat().st_size
-            if size > max_untracked_bytes:
-                hashed.append({"path": p, "size": size, "sha256": _sha256(f)})
-            else:
-                inline.append(p)
+        # The untracked scan gets its own try: if it fails, keep everything else.
+        scan_error = None
+        try:
+            inline, hashed = _scan_untracked(
+                root, untracked_code, skip, max_untracked_bytes, UNTRACKED_SCAN_TIMEOUT
+            )
+            diff = (
+                _diff_with_untracked(root, inline, UNTRACKED_SCAN_TIMEOUT)
+                if tracked or inline or hashed else None
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            scan_error = _describe_failure(exc)
+            inline, hashed = [], []
+            diff = _git(["diff", "HEAD", "--binary"], root).stdout if tracked else None
         recorded_untracked = inline + [h["path"] for h in hashed]
 
         dirty_tracked = [p for p in tracked if not _matches(p, dirty_ignore)]
@@ -242,7 +284,7 @@ def git_info(
             "available": True,
             "commit": head.stdout.strip(),
             "branch": branch,
-            "dirty": bool(dirty_tracked or dirty_untracked),
+            "dirty": bool(dirty_tracked or dirty_untracked or scan_error),
             "root": str(root),
             "remote": _clean_remote(remote.stdout) if remote.returncode == 0 else None,
             "dirty_files": {"tracked": dirty_tracked, "untracked": dirty_untracked},
@@ -250,13 +292,13 @@ def git_info(
             "dirty_ignore": dirty_ignore,
             "untracked_code": untracked_code,
         }
-        if not (tracked or recorded_untracked):
+        if scan_error:
+            info["untracked_scan"] = f"failed: {scan_error}"
+        if diff is None:
             return info, None
         info["changed_files"] = tracked + recorded_untracked
         if hashed:
             info["untracked_too_large"] = hashed
-        diff = _diff_with_untracked(root, inline)
-        if hashed:
             note = [
                 "# exptrail: untracked files over the size limit "
                 f"({max_untracked_bytes} bytes) are recorded by hash, not included below:"
