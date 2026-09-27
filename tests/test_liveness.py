@@ -112,6 +112,22 @@ def test_finish_inside_with_block_is_kept(workdir, quiet):
     assert not (run.dir / "traceback.txt").exists()
 
 
+def test_warning_as_error_in_start_cleans_up(workdir, default_sigterm):
+    """A git warning turned into an error must not leave a half-started run behind."""
+    run = Run("strict")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(NoGitWarning):
+            run.start()
+    assert not heartbeat_threads()
+    assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+    meta = meta_of(run.dir)
+    assert meta["status"] == "failed" and "NoGitWarning" in meta["error"]
+    assert (run.dir / "traceback.txt").exists()
+    assert run._finished  # the atexit hook, if it were still registered, does nothing
+    assert SavedRun(run.dir).status == "failed"
+
+
 def test_with_and_track_leave_no_heartbeat_thread(workdir, quiet):
     with Run("w"):
         assert heartbeat_threads()
@@ -308,6 +324,25 @@ def test_sigkilled_run_is_dead(workdir):
     assert run.stored_status == "running"  # nothing wrote a status...
     assert run.status == "dead"  # ...but the evidence says it died
     assert run.status_display() == "dead (pid gone)"
+
+
+@needs_identity
+def test_saved_run_is_reassessed_on_every_read(workdir):
+    """A long-lived SavedRun notices the job dying; nothing is cached."""
+    proc = spawn("""
+        import time
+        from exptrail import Run
+        run = Run("victim").start()
+        print(run.dir, flush=True)
+        time.sleep(60)
+    """, workdir)
+    run = SavedRun(Path(proc.stdout.readline().strip()))
+    try:
+        assert run.status == "running"
+    finally:
+        proc.kill()
+        proc.communicate(timeout=60)
+    assert run.status == "dead"  # same object, fresh assessment
 
 
 def test_unknown_host_old_heartbeat_is_stale(workdir):

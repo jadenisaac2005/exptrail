@@ -205,13 +205,20 @@ class Run:
         self._owner_pid = os.getpid()
         self._heartbeat = Heartbeat(self.dir / HEARTBEAT_FILE, self.heartbeat_s)
         self._heartbeat.start()
-        _write_json(self.dir / "config.json", self.config)
-        _write_json(self.dir / "meta.json", self.meta)
-        _write_json(self.dir / "summary.json", self._summary)
-        self._expand_columns(self.dir / "metrics.csv", ["step"])  # exists even if log() is never called
-        self._install_sigterm()
-        atexit.register(self._at_exit)
-        self._warn_about_git(git)
+        try:
+            _write_json(self.dir / "config.json", self.config)
+            _write_json(self.dir / "meta.json", self.meta)
+            _write_json(self.dir / "summary.json", self._summary)
+            self._expand_columns(self.dir / "metrics.csv", ["step"])  # exists even if log() is never called
+            self._install_sigterm()
+            atexit.register(self._at_exit)
+            self._warn_about_git(git)  # raises if the user turned warnings into errors
+        except BaseException as exc:
+            # __enter__ never returns, so __exit__ won't run: end the run here, or its
+            # heartbeat would keep it looking alive until the interpreter exits.
+            status = "failed" if isinstance(exc, Exception) else "interrupted"
+            self.finish(status, "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+            raise
         return self
 
     def _install_sigterm(self) -> None:

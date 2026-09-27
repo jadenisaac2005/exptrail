@@ -6,7 +6,6 @@ import csv
 import glob
 import json
 from dataclasses import dataclass
-from functools import cached_property
 from pathlib import Path
 
 from .liveness import Liveness, assess
@@ -55,20 +54,23 @@ class SavedRun:
         """The status as written in meta.json."""
         return self.meta.get("status", "unknown")
 
-    @cached_property
+    @property
     def liveness(self) -> Liveness | None:
-        """For a stored ``running`` status, whether it really is (reads only)."""
+        """For a stored ``running`` status, whether it really is. Re-assessed on every
+        access (never cached), so a long-lived SavedRun notices the job dying. Reads only."""
         return assess(self.path, self.meta) if self.stored_status == "running" else None
 
     @property
     def status(self) -> str:
         """Status worked out at read time: a ``running`` run may be ``dead`` or ``stale``."""
-        return self.liveness.status if self.liveness else self.stored_status
+        live = self.liveness
+        return live.status if live else self.stored_status
 
     def status_display(self) -> str:
         """Status with its evidence, e.g. ``stale (last heartbeat 14m ago)``."""
-        if self.liveness:
-            return self.liveness.display()
+        live = self.liveness
+        if live:
+            return live.display()
         marked = self.meta.get("marked")
         if isinstance(marked, dict) and marked.get("by") == "hand":
             return f"{self.stored_status} (marked by hand)"
