@@ -133,6 +133,7 @@ exptrail plot sgd-lr0.1 momentum-lr0.01 --metric val_acc -o val_acc.png
 exptrail table --metric test_acc --runs '*digits*' --readme README.md
 exptrail verify README.md                     # non-zero exit on any mismatch
 exptrail mark momentum-lr0.01 interrupted     # make a dead/stale status permanent
+exptrail annotate momentum-lr0.01 lb_score=0.913   # add a number that arrived after the run
 ```
 
 Runs can be referred to by folder name, path, run name (latest wins) or a unique substring. `--root DIR` points any command at another runs directory.
@@ -146,6 +147,8 @@ Runs can be referred to by folder name, path, run name (latest wins) or a unique
 ```
 
 For links in the table to work on GitHub, commit the run folders you report.
+
+**`annotate`** adds `key=value` pairs to a run's `summary.json` after the run has ended, for numbers that only arrive later, such as a leaderboard score. Values are parsed as JSON when they can be (`0.913`, `12`, `true`, `null`) and kept as strings otherwise. `summary.json` stays a flat `key -> value` object, so `table`, `verify` and `show` treat annotated values like any other. Provenance goes in `meta.json` under `annotations`, as `{"lb_score": {"at": "<UTC timestamp>", "by": "hand"}}`, and `show` marks those keys `(added later, <date>)`. `annotate` refuses to overwrite a key that is already in `summary.json`, and refuses a run that still shows as `running`; `--force` does both, and an overwrite also records the old value as `"previous"`. (A run that really is still running rewrites `summary.json` and `meta.json` when it finishes, which drops an annotation made in the meantime.) From Python, `SavedRun(path).annotate({"lb_score": 0.913})` does the same.
 
 ## Example
 

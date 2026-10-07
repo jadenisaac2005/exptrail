@@ -1,4 +1,4 @@
-"""Command-line interface: ls, show, compare, plot, table, verify, mark."""
+"""Command-line interface: ls, show, compare, plot, table, verify, mark, annotate."""
 
 from __future__ import annotations
 
@@ -58,8 +58,19 @@ def cmd_show(args) -> int:
     for title, data in (("config", run.config), ("summary", run.summary), ("meta", run.meta)):
         print(f"## {title}")
         print(json.dumps(data, indent=2))
+        if title == "summary":
+            for key, note in run.annotations.items():
+                if key in data and isinstance(note, dict):
+                    print(f"{key}: {_annotation_note(note)}")
         print()
     return 0
+
+
+def _annotation_note(note: dict) -> str:
+    text = f"added later, {str(note.get('at', '?'))[:10]}"
+    if "previous" in note:
+        text += f"; replaced {_fmt(note['previous'])}"
+    return f"({text})"
 
 
 def cmd_compare(args) -> int:
@@ -146,6 +157,33 @@ def cmd_mark(args) -> int:
     return 0
 
 
+def parse_pair(pair: str) -> tuple[str, object]:
+    """``key=value``; the value is parsed as JSON if it can be, else kept as a string."""
+    key, sep, raw = pair.partition("=")
+    key = key.strip()
+    if not sep or not key:
+        raise ValueError(f"expected key=value, got {pair!r}")
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        value = raw
+    return key, value
+
+
+def cmd_annotate(args) -> int:
+    run = find_run(args.run, args.root)
+    values = dict(parse_pair(p) for p in args.pairs)
+    try:
+        replaced = run.annotate(values, force=args.force)
+    except (RuntimeError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    for key, value in values.items():
+        was = f" (was {_fmt(replaced[key])})" if key in replaced else ""
+        print(f"annotated {run.id}: {key}={_fmt(value)}{was}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="exptrail", description=__doc__)
     p.add_argument("--root", type=Path, default=None, help="runs directory (default: $EXPTRAIL_ROOT or ./runs)")
@@ -191,6 +229,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("status", choices=END_STATUSES)
     s.add_argument("--force", action="store_true", help="mark it even if it still shows as running")
     s.set_defaults(func=cmd_mark)
+
+    s = sub.add_parser("annotate", help="add summary values to a finished run (e.g. a leaderboard score)")
+    s.add_argument("run")
+    s.add_argument("pairs", nargs="+", metavar="key=value", help="value parsed as JSON if possible, else a string")
+    s.add_argument("--force", action="store_true", help="overwrite existing keys, or annotate a run that shows as running")
+    s.set_defaults(func=cmd_annotate)
     return p
 
 
