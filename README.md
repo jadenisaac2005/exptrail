@@ -70,6 +70,8 @@ Paths in `meta.json` (`cwd`, `python_executable`, `argv`, `git.root`) have your 
 
 A dirty working tree triggers a loud `DirtyTreeWarning`: that run's numbers can't be reproduced from a commit, so commit first if you plan to report them.
 
+If you start many runs from a dirty tree on purpose (quick iterations you won't report), set `EXPTRAIL_QUIET=1` (or `true`/`yes`, any case) to get a one-line warning instead of the banner, e.g. `exptrail: dirty tree (3 files: a.py, b.py, +1 more); patch saved to <run folder>/git_diff.patch`. It is the same `DirtyTreeWarning`, so warning filters and `-W error` behave as before; it still says when untracked files couldn't be checked and when no patch was written. The run is recorded exactly the same either way.
+
 ### What counts as dirty
 
 - **Modified tracked files** make a run dirty, unless they match `dirty_ignore`.

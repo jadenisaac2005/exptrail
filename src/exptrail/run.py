@@ -36,6 +36,11 @@ class NoGitWarning(UserWarning):
     """No git repository was found, so the run can't be tied to a commit."""
 
 
+def _quiet() -> bool:
+    """``$EXPTRAIL_QUIET`` set to 1/true/yes: one-line DirtyTreeWarning instead of the banner."""
+    return os.environ.get("EXPTRAIL_QUIET", "").strip().lower() in ("1", "true", "yes")
+
+
 def default_root() -> Path:
     return Path(os.environ.get("EXPTRAIL_ROOT", "runs"))
 
@@ -287,6 +292,8 @@ class Run:
                 NoGitWarning,
                 stacklevel=user_stacklevel(),
             )
+        elif git["dirty"] and _quiet():
+            warnings.warn(self._quiet_dirty_message(git), DirtyTreeWarning, stacklevel=user_stacklevel())
         elif git["dirty"]:
             dirty = git["dirty_files"]
             names = dirty["tracked"] + [f"{p} (untracked)" for p in dirty["untracked"]]
@@ -326,6 +333,27 @@ class Run:
                 DirtyTreeWarning,
                 stacklevel=user_stacklevel(),
             )
+
+    def _quiet_dirty_message(self, git: dict) -> str:
+        """The one-line DirtyTreeWarning used when ``$EXPTRAIL_QUIET`` is set."""
+        dirty = git["dirty_files"]
+        names = dirty["tracked"] + dirty["untracked"]
+        what = ""
+        if names:
+            shown = ", ".join(names[:2]) + (f", +{len(names) - 2} more" if len(names) > 2 else "")
+            what = f"{len(names)} file{'s' if len(names) != 1 else ''}: {shown}"
+        scan = git.get("untracked_scan", "")
+        if scan.startswith("failed"):
+            what = "; ".join(filter(None, [what, f"untracked files unchecked: {scan[len('failed: '):]}"]))
+        parts = [f"exptrail: dirty tree ({what})"]
+        if git.get("diff_file"):
+            parts.append(f"patch saved to {self.dir.name}/git_diff.patch")
+        hashed = ", ".join(h["path"] for h in git.get("untracked_too_large", []))
+        if hashed:
+            parts.append(f"too large for a patch, recorded by sha256 in meta.json: {hashed}")
+        if not git.get("diff_file"):
+            parts.append("no patch written")
+        return "; ".join(parts)
 
     def finish(self, status: str = "finished", error: str | None = None, *, reason: str | None = None) -> None:
         """Record how the run ended. Safe to call more than once: only the first call counts."""

@@ -16,6 +16,7 @@ def workdir(tmp_path, monkeypatch):
     """An empty cwd outside any git repo."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("EXPTRAIL_ROOT", raising=False)
+    monkeypatch.delenv("EXPTRAIL_QUIET", raising=False)  # tests that want it set it themselves
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
     return tmp_path
 

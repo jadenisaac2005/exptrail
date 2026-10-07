@@ -382,3 +382,111 @@ def test_dirty_warning_line_layout(repo, monkeypatch):
     assert lines[3] == "Untracked files could not be checked (timed out after 60s), so"
     assert lines[5].startswith("commit ") and lines[5].endswith(".")
     assert lines[6].startswith("Tracked changes were saved to ")
+
+
+# -- EXPTRAIL_QUIET: one-line warning instead of the banner -------------------
+
+def failing_untracked_scan(monkeypatch):
+    real_git = meta_mod._git
+
+    def flaky_git(args, cwd, env=None, timeout=15):
+        if "ls-files" in args:
+            raise subprocess.TimeoutExpired(["git", *args], timeout)
+        return real_git(args, cwd, env, timeout)
+
+    monkeypatch.setattr(meta_mod, "_git", flaky_git)
+
+
+def only_warning(record):
+    assert len(record) == 1
+    message = str(record[0].message)
+    assert "\n" not in message and "!" not in message
+    return message
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "Yes"])
+def test_quiet_dirty_warning_with_patch(repo, monkeypatch, value):
+    monkeypatch.setenv("EXPTRAIL_QUIET", value)
+    (repo / "train.py").write_text("print('changed')\n")
+    for name in ("a.py", "b.py"):
+        (repo / name).write_text("x = 1\n")
+    with pytest.warns(DirtyTreeWarning) as record:
+        with Run("quiet") as run:
+            pass
+    assert only_warning(record) == (
+        f"exptrail: dirty tree (3 files: train.py, a.py, +1 more); "
+        f"patch saved to {run.dir.name}/git_diff.patch"
+    )
+    assert record[0].filename == __file__  # same stacklevel helper: points at the `with` line
+    assert (run.dir / "git_diff.patch").exists()
+
+
+def test_quiet_dirty_warning_scan_failed(repo, monkeypatch):
+    monkeypatch.setenv("EXPTRAIL_QUIET", "1")
+    failing_untracked_scan(monkeypatch)
+    (repo / "train.py").write_text("print('changed')\n")
+    with pytest.warns(DirtyTreeWarning) as record:
+        with Run("quiet-scan") as run:
+            pass
+    assert only_warning(record) == (
+        "exptrail: dirty tree (1 file: train.py; untracked files unchecked: timed out after 60s); "
+        f"patch saved to {run.dir.name}/git_diff.patch"
+    )
+
+
+def test_quiet_dirty_warning_scan_failed_clean_tree(repo, monkeypatch):
+    monkeypatch.setenv("EXPTRAIL_QUIET", "1")
+    failing_untracked_scan(monkeypatch)
+    with pytest.warns(DirtyTreeWarning) as record:
+        with Run("quiet-scan-clean"):
+            pass
+    assert only_warning(record) == (
+        "exptrail: dirty tree (untracked files unchecked: timed out after 60s); no patch written"
+    )
+
+
+def test_quiet_dirty_warning_hash_only(repo, monkeypatch):
+    monkeypatch.setenv("EXPTRAIL_QUIET", "1")
+    write_big(repo)
+    with pytest.warns(DirtyTreeWarning) as record:
+        with Run("quiet-hash") as run:
+            pass
+    assert only_warning(record) == (
+        "exptrail: dirty tree (1 file: big.py); "
+        "too large for a patch, recorded by sha256 in meta.json: big.py; no patch written"
+    )
+    assert not (run.dir / "git_diff.patch").exists()
+
+
+@pytest.mark.parametrize("value", ["", "0", "false", "no", "quiet"])
+def test_quiet_off_keeps_banner_byte_for_byte(repo, monkeypatch, value):
+    (repo / "train.py").write_text("print('changed')\n")
+    write_big(repo)
+    monkeypatch.delenv("EXPTRAIL_QUIET", raising=False)
+    with pytest.warns(DirtyTreeWarning) as unset:
+        with Run("banner") as run_unset:
+            pass
+    monkeypatch.setenv("EXPTRAIL_QUIET", value)
+    with pytest.warns(DirtyTreeWarning) as off:
+        with Run("banner") as run_off:
+            pass
+    bar = "!" * 72
+    expected = (
+        f"\n{bar}\nexptrail: WORKING TREE IS DIRTY (train.py, big.py (untracked))\n"
+        f"Run {{name}} used uncommitted code, so its numbers can't be\n"
+        f"reproduced from commit {git(repo, 'rev-parse', 'HEAD')[:10]}. The diff was saved to\n"
+        f"{{patch}}. Commit first for a reportable result.\n"
+        f"Too large to include, recorded by sha256 in meta.json: big.py.\n{bar}"
+    )
+    for record, run in ((unset, run_unset), (off, run_off)):
+        assert str(record[0].message) == expected.format(
+            name=run.dir.name, patch=run.dir / "git_diff.patch")
+
+
+def test_quiet_warning_still_an_error_under_W_error(repo, monkeypatch):
+    monkeypatch.setenv("EXPTRAIL_QUIET", "1")
+    (repo / "train.py").write_text("print('changed')\n")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DirtyTreeWarning)
+        with pytest.raises(DirtyTreeWarning, match="^exptrail: dirty tree"):
+            Run("strict").start()
