@@ -79,6 +79,11 @@ class SavedRun:
         return self.stored_status
 
     @property
+    def primary_metric(self) -> str | None:
+        primary = self.meta.get("primary_metric")
+        return primary if isinstance(primary, str) else None
+
+    @property
     def commit(self) -> str | None:
         return self.meta.get("git", {}).get("commit")
 

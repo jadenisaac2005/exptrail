@@ -49,6 +49,8 @@ run.finish()                             # or run.finish("failed"); calling it t
 
 `with Run(...)`, `@track` and `start()`/`finish()` share one code path. Wrap **the whole job**, data loading and evaluation included: `duration_s` only covers the run's own span, and anything that crashes outside it isn't recorded.
 
+`exptrail ls` shows the first 3 summary metrics of each run. Name the one you report with `Run(..., primary="test_acc")` (or `@track(primary="test_acc")`) and `ls` shows it first, then fills the remaining slots in the usual order. It is stored as `primary_metric` in `meta.json`. `exptrail ls --metric NAME` (repeatable, short `-m`) shows exactly the metrics you name for every run, whatever their primary metric, with `—` where a run doesn't have one.
+
 Each run writes `runs/<UTC timestamp>_<name>/` (override with `root=` or `$EXPTRAIL_ROOT`):
 
 | file | contents |
@@ -56,7 +58,7 @@ Each run writes `runs/<UTC timestamp>_<name>/` (override with `root=` or `$EXPTR
 | `config.json` | the config you passed |
 | `metrics.csv` | one row per `log()` call: `step`, then your metrics |
 | `summary.json` | final numbers, written on every `summary()` call |
-| `meta.json` | status (see [Run status](#run-status)), git commit/branch/remote/dirty flag (and which files set it), Python + numpy/torch/scikit-learn versions, hostname, argv, cwd, seeds, start/end time, and a `liveness` record (hostname, pid, process start time, boot ID, heartbeat interval) |
+| `meta.json` | status (see [Run status](#run-status)), git commit/branch/remote/dirty flag (and which files set it), Python + numpy/torch/scikit-learn versions, hostname, argv, cwd, seeds, start/end time, a `liveness` record (hostname, pid, process start time, boot ID, heartbeat interval), and, only when set, `primary_metric` |
 | `heartbeat` | touched every 30 s while the run is alive; removed when it finishes |
 | `git_diff.patch` | uncommitted changes (tracked edits plus new untracked code files), only if there were any |
 | `traceback.txt` | only if the run raised |
@@ -127,6 +129,7 @@ exptrail mark momentum-lr0.01 interrupted     # or failed / finished; notes that
 
 ```bash
 exptrail ls                                   # name, status, key metrics, commit (* = dirty)
+exptrail ls -m test_acc -m val_loss           # show exactly these summary metrics
 exptrail show momentum-lr0.01                 # config + summary + meta
 exptrail compare sgd-lr0.1 momentum-lr0.01    # config diff + metric table
 exptrail plot sgd-lr0.1 momentum-lr0.01 --metric val_acc -o val_acc.png

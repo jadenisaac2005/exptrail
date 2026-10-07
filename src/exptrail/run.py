@@ -119,6 +119,8 @@ class Run:
     the run dirty (default: ``*.py``, ``*.ipynb``, ``*.pyx``, ``*.yaml``,
     ``*.yml``, ``*.toml``). Either one, when omitted, is read from
     ``[tool.exptrail]`` in the repo's pyproject.toml (Python 3.11+).
+
+    ``primary`` names the headline summary metric; ``exptrail ls`` shows it first.
     """
 
     def __init__(
@@ -133,13 +135,17 @@ class Run:
         dirty_ignore: list[str] | None = None,
         untracked_code: list[str] | None = None,
         heartbeat_s: float | None = None,
+        primary: str | None = None,
     ):
+        if primary is not None and not isinstance(primary, str):
+            raise TypeError(f"primary must be a metric name string, got {primary!r}")
         self.name = name
         self.config = dict(config or {})
         self.tags = list(tags or [])
         self.seeds = seeds
         self.notes = notes
         self.redact_paths = redact_paths
+        self.primary = primary
         # None means "not set here": fall back to pyproject.toml, then the defaults.
         self.dirty_ignore = None if dirty_ignore is None else check_patterns("dirty_ignore", dirty_ignore)
         self.untracked_code = (
@@ -202,6 +208,8 @@ class Run:
             "exptrail_version": __version__,
             "liveness": record(self.heartbeat_s),
         }
+        if self.primary is not None:
+            self.meta["primary_metric"] = self.primary
         self._owner_pid = os.getpid()
         self._heartbeat = Heartbeat(self.dir / HEARTBEAT_FILE, self.heartbeat_s)
         self._heartbeat.start()
@@ -445,6 +453,7 @@ def track(
     dirty_ignore: list[str] | None = None,
     untracked_code: list[str] | None = None,
     heartbeat_s: float | None = None,
+    primary: str | None = None,
 ):
     """Decorator form of :class:`Run`.
 
@@ -467,7 +476,8 @@ def track(
                 cfg = {k: v for k, v in with_defaults.arguments.items() if k != "run"}
             with Run(name or func.__name__, config=cfg, tags=tags, seeds=seeds, root=root,
                      redact_paths=redact_paths, dirty_ignore=dirty_ignore,
-                     untracked_code=untracked_code, heartbeat_s=heartbeat_s) as run:
+                     untracked_code=untracked_code, heartbeat_s=heartbeat_s,
+                     primary=primary) as run:
                 if wants_run:
                     # Replace ``run`` wherever it was bound (positional or keyword).
                     bound.arguments["run"] = run

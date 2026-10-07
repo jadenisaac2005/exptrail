@@ -34,6 +34,17 @@ def _resolve(refs: list[str], root: Path) -> list[SavedRun]:
     return [find_run(r, root) for r in refs]
 
 
+LS_METRICS = 3
+
+
+def _default_metrics(summary: dict, primary: str | None) -> list[str]:
+    """The run's primary metric first (if it set one), then the rest in order."""
+    keys = list(summary)
+    if primary is None:
+        return keys[:LS_METRICS]
+    return [primary, *(k for k in keys if k != primary)][:LS_METRICS]
+
+
 def cmd_ls(args) -> int:
     runs = list_runs(args.root)
     if not runs:
@@ -42,7 +53,7 @@ def cmd_ls(args) -> int:
     rows = []
     for run in runs:
         summary = run.summary
-        keys = args.metric or list(summary)[:3]
+        keys = args.metric or _default_metrics(summary, run.primary_metric)
         metrics = ", ".join(f"{k}={_fmt(summary.get(k))}" for k in keys)
         rows.append([run.id, run.status_display(), metrics, run.short_commit()])
     print_table(["run", "status", "summary", "commit"], rows)
@@ -190,7 +201,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("ls", help="list runs")
-    s.add_argument("--metric", action="append", help="summary metric to show (repeatable)")
+    s.add_argument("--metric", "-m", action="append",
+                   help="summary metric to show, instead of the run's primary metric and the first 3 (repeatable)")
     s.set_defaults(func=cmd_ls)
 
     s = sub.add_parser("show", help="show config, summary and meta of a run")
