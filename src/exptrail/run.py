@@ -121,6 +121,9 @@ class Run:
     ``[tool.exptrail]`` in the repo's pyproject.toml (Python 3.11+).
 
     ``primary`` names the headline summary metric; ``exptrail ls`` shows it first.
+    ``parent`` is the folder name of the run this one builds on (e.g. the model
+    run a predict/rescore run loads); only the folder name is stored, and it
+    need not exist yet.
     """
 
     def __init__(
@@ -136,9 +139,16 @@ class Run:
         untracked_code: list[str] | None = None,
         heartbeat_s: float | None = None,
         primary: str | None = None,
+        parent: str | None = None,
     ):
         if primary is not None and not isinstance(primary, str):
             raise TypeError(f"primary must be a metric name string, got {primary!r}")
+        if parent is not None:
+            if not isinstance(parent, str):
+                raise TypeError(f"parent must be a run folder name string, got {parent!r}")
+            parent = Path(parent).name  # a path to the folder is fine; never store it
+            if parent in ("", ".", ".."):
+                raise ValueError("parent must name a run folder")
         self.name = name
         self.config = dict(config or {})
         self.tags = list(tags or [])
@@ -146,6 +156,7 @@ class Run:
         self.notes = notes
         self.redact_paths = redact_paths
         self.primary = primary
+        self.parent = parent
         # None means "not set here": fall back to pyproject.toml, then the defaults.
         self.dirty_ignore = None if dirty_ignore is None else check_patterns("dirty_ignore", dirty_ignore)
         self.untracked_code = (
@@ -210,6 +221,8 @@ class Run:
         }
         if self.primary is not None:
             self.meta["primary_metric"] = self.primary
+        if self.parent is not None:
+            self.meta["parent"] = self.parent
         self._owner_pid = os.getpid()
         self._heartbeat = Heartbeat(self.dir / HEARTBEAT_FILE, self.heartbeat_s)
         self._heartbeat.start()
@@ -454,6 +467,7 @@ def track(
     untracked_code: list[str] | None = None,
     heartbeat_s: float | None = None,
     primary: str | None = None,
+    parent: str | None = None,
 ):
     """Decorator form of :class:`Run`.
 
@@ -477,7 +491,7 @@ def track(
             with Run(name or func.__name__, config=cfg, tags=tags, seeds=seeds, root=root,
                      redact_paths=redact_paths, dirty_ignore=dirty_ignore,
                      untracked_code=untracked_code, heartbeat_s=heartbeat_s,
-                     primary=primary) as run:
+                     primary=primary, parent=parent) as run:
                 if wants_run:
                     # Replace ``run`` wherever it was bound (positional or keyword).
                     bound.arguments["run"] = run

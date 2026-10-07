@@ -65,7 +65,10 @@ def cmd_ls(args) -> int:
 def cmd_show(args) -> int:
     run = find_run(args.run, args.root)
     print(f"# {run.id}  ({run.path})\n")
-    print(f"status: {run.status_display()}\n")
+    print(f"status: {run.status_display()}")
+    if run.parent is not None:
+        print(f"parent: {_parent_display(run)}")
+    print()
     for title, data in (("config", run.config), ("summary", run.summary), ("meta", run.meta)):
         print(f"## {title}")
         print(json.dumps(data, indent=2))
@@ -82,6 +85,12 @@ def _annotation_note(note: dict) -> str:
     if "previous" in note:
         text += f"; replaced {_fmt(note['previous'])}"
     return f"({text})"
+
+
+def _parent_display(run: SavedRun) -> str:
+    if run.parent is None:
+        return _fmt(None)
+    return run.parent if run.parent_run() else f"{run.parent} (not found in this runs folder)"
 
 
 def cmd_compare(args) -> int:
@@ -101,7 +110,10 @@ def cmd_compare(args) -> int:
     print("\n## summary")
     print_table(["metric", *ids], [[k, *(_fmt(s.get(k)) for s in summaries)] for k in mkeys])
     print("\n## provenance")
-    print_table(["", *ids], [["status", *(r.status_display() for r in runs)], ["commit", *(r.short_commit() for r in runs)]])
+    rows = [["status", *(r.status_display() for r in runs)], ["commit", *(r.short_commit() for r in runs)]]
+    if any(r.parent is not None for r in runs):
+        rows.append(["parent", *(_parent_display(r) for r in runs)])
+    print_table(["", *ids], rows)
     return 0
 
 

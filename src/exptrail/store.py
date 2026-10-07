@@ -84,6 +84,19 @@ class SavedRun:
         return primary if isinstance(primary, str) else None
 
     @property
+    def parent(self) -> str | None:
+        """Folder name of the run this one builds on, as recorded at start."""
+        parent = self.meta.get("parent")
+        return parent if isinstance(parent, str) and parent else None
+
+    def parent_run(self) -> SavedRun | None:
+        """The parent run, if it is in the same runs folder as this one."""
+        if self.parent is None or Path(self.parent).name != self.parent:
+            return None
+        path = self.path.parent / self.parent
+        return SavedRun(path) if is_run_dir(path) else None
+
+    @property
     def commit(self) -> str | None:
         return self.meta.get("git", {}).get("commit")
 

@@ -51,6 +51,8 @@ run.finish()                             # or run.finish("failed"); calling it t
 
 `exptrail ls` shows the first 3 summary metrics of each run. Name the one you report with `Run(..., primary="test_acc")` (or `@track(primary="test_acc")`) and `ls` shows it first, then fills the remaining slots in the usual order. It is stored as `primary_metric` in `meta.json`. `exptrail ls --metric NAME` (repeatable, short `-m`) shows exactly the metrics you name for every run, whatever their primary metric, with `—` where a run doesn't have one.
 
+A run that uses another run's output (a predict or rescore run loading a saved model) can point to it with `Run(..., parent="20260924-055909_momentum-lr0.01")` (or `@track(parent=...)`). Only the folder name is stored, as `parent` in `meta.json`; a path is cut down to its folder name, and nothing checks at start that the folder exists. `exptrail show` prints a `parent:` line, marked `(not found in this runs folder)` when that folder isn't next to the run, and `exptrail compare` adds a `parent` row when any of the runs has one.
+
 Each run writes `runs/<UTC timestamp>_<name>/` (override with `root=` or `$EXPTRAIL_ROOT`):
 
 | file | contents |
@@ -58,7 +60,7 @@ Each run writes `runs/<UTC timestamp>_<name>/` (override with `root=` or `$EXPTR
 | `config.json` | the config you passed |
 | `metrics.csv` | one row per `log()` call: `step`, then your metrics |
 | `summary.json` | final numbers, written on every `summary()` call |
-| `meta.json` | status (see [Run status](#run-status)), git commit/branch/remote/dirty flag (and which files set it), Python + numpy/torch/scikit-learn versions, hostname, argv, cwd, seeds, start/end time, a `liveness` record (hostname, pid, process start time, boot ID, heartbeat interval), and, only when set, `primary_metric` |
+| `meta.json` | status (see [Run status](#run-status)), git commit/branch/remote/dirty flag (and which files set it), Python + numpy/torch/scikit-learn versions, hostname, argv, cwd, seeds, start/end time, a `liveness` record (hostname, pid, process start time, boot ID, heartbeat interval), and, only when set, `primary_metric` and `parent` |
 | `heartbeat` | touched every 30 s while the run is alive; removed when it finishes |
 | `git_diff.patch` | uncommitted changes (tracked edits plus new untracked code files), only if there were any |
 | `traceback.txt` | only if the run raised |
