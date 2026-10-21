@@ -95,3 +95,23 @@ def test_show_marks_annotated_keys(done, capsys):
     date = read(done, "meta.json")["annotations"]["lb"]["at"][:10]
     assert f"lb: (added later, {date})" in summary
     assert "val_acc:" not in summary.split("}")[1]  # only annotated keys are marked
+
+
+def test_annotate_failure_between_writes_keeps_provenance(done, monkeypatch):
+    from exptrail import store
+
+    real = store._write_json
+    calls = []
+
+    def flaky(path, data):
+        calls.append(path.name)
+        if len(calls) == 2:
+            raise OSError("disk full")
+        real(path, data)
+
+    monkeypatch.setattr(store, "_write_json", flaky)
+    with pytest.raises(OSError):
+        SavedRun(done).annotate({"lb": 0.913, "rank": 12})
+    assert calls == ["meta.json", "summary.json"]
+    added = set(read(done, "summary.json")) - {"val_acc"}
+    assert added <= set(read(done, "meta.json").get("annotations", {}))
