@@ -6,9 +6,11 @@ import csv
 import glob
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .liveness import Liveness, assess
+from .run import _write_json, to_jsonable
 
 
 @dataclass
@@ -77,6 +79,24 @@ class SavedRun:
         return self.stored_status
 
     @property
+    def primary_metric(self) -> str | None:
+        primary = self.meta.get("primary_metric")
+        return primary if isinstance(primary, str) else None
+
+    @property
+    def parent(self) -> str | None:
+        """Folder name of the run this one builds on, as recorded at start."""
+        parent = self.meta.get("parent")
+        return parent if isinstance(parent, str) and parent else None
+
+    def parent_run(self) -> SavedRun | None:
+        """The parent run, if it is in the same runs folder as this one."""
+        if self.parent is None or Path(self.parent).name != self.parent:
+            return None
+        path = self.path.parent / self.parent
+        return SavedRun(path) if is_run_dir(path) else None
+
+    @property
     def commit(self) -> str | None:
         return self.meta.get("git", {}).get("commit")
 
@@ -88,6 +108,43 @@ class SavedRun:
         if not self.commit:
             return "no-git"
         return self.commit[:7] + ("*" if self.dirty else "")
+
+    @property
+    def annotations(self) -> dict:
+        """``{key: {"at", "by"[, "previous"]}}`` for summary keys added after the run."""
+        notes = self.meta.get("annotations")
+        return notes if isinstance(notes, dict) else {}
+
+    def annotate(self, values: dict, force: bool = False) -> dict:
+        """Add ``values`` to summary.json after the run, recording provenance in meta.json.
+
+        Refuses to overwrite an existing summary key, or to touch a run that
+        still shows as ``running``, unless ``force``. Returns ``{key: previous}``
+        for the keys that were overwritten.
+        """
+        if not values:
+            raise ValueError("nothing to annotate")
+        if self.status == "running" and not force:
+            raise RuntimeError(f"{self.id} shows as {self.status_display()}; pass --force to annotate it anyway")
+        summary = self.read_json("summary.json")
+        meta = self.read_json("meta.json")
+        clash = [k for k in values if k in summary]
+        if clash and not force:
+            raise ValueError(f"{self.id} already has {', '.join(clash)} in summary.json; pass --force to overwrite")
+        at = datetime.now(timezone.utc).isoformat()
+        notes = meta.get("annotations")
+        notes = dict(notes) if isinstance(notes, dict) else {}
+        replaced = {}
+        for key, value in values.items():
+            note = {"at": at, "by": "hand"}
+            if key in summary:
+                replaced[key] = note["previous"] = summary[key]
+            summary[key] = to_jsonable(value)
+            notes[key] = note
+        meta["annotations"] = notes
+        _write_json(self.path / "summary.json", summary)
+        _write_json(self.path / "meta.json", meta)
+        return replaced
 
     def metrics(self) -> list[dict[str, float]]:
         path = self.path / "metrics.csv"

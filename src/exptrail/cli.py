@@ -1,4 +1,4 @@
-"""Command-line interface: ls, show, compare, plot, table, verify, mark."""
+"""Command-line interface: ls, show, compare, plot, table, verify, mark, annotate."""
 
 from __future__ import annotations
 
@@ -34,6 +34,17 @@ def _resolve(refs: list[str], root: Path) -> list[SavedRun]:
     return [find_run(r, root) for r in refs]
 
 
+LS_METRICS = 3
+
+
+def _default_metrics(summary: dict, primary: str | None) -> list[str]:
+    """The run's primary metric first (if it set one), then the rest in order."""
+    keys = list(summary)
+    if primary is None:
+        return keys[:LS_METRICS]
+    return [primary, *(k for k in keys if k != primary)][:LS_METRICS]
+
+
 def cmd_ls(args) -> int:
     runs = list_runs(args.root)
     if not runs:
@@ -42,7 +53,7 @@ def cmd_ls(args) -> int:
     rows = []
     for run in runs:
         summary = run.summary
-        keys = args.metric or list(summary)[:3]
+        keys = args.metric or _default_metrics(summary, run.primary_metric)
         metrics = ", ".join(f"{k}={_fmt(summary.get(k))}" for k in keys)
         rows.append([run.id, run.status_display(), metrics, run.short_commit()])
     print_table(["run", "status", "summary", "commit"], rows)
@@ -54,12 +65,32 @@ def cmd_ls(args) -> int:
 def cmd_show(args) -> int:
     run = find_run(args.run, args.root)
     print(f"# {run.id}  ({run.path})\n")
-    print(f"status: {run.status_display()}\n")
+    print(f"status: {run.status_display()}")
+    if run.parent is not None:
+        print(f"parent: {_parent_display(run)}")
+    print()
     for title, data in (("config", run.config), ("summary", run.summary), ("meta", run.meta)):
         print(f"## {title}")
         print(json.dumps(data, indent=2))
+        if title == "summary":
+            for key, note in run.annotations.items():
+                if key in data and isinstance(note, dict):
+                    print(f"{key}: {_annotation_note(note)}")
         print()
     return 0
+
+
+def _annotation_note(note: dict) -> str:
+    text = f"added later, {str(note.get('at', '?'))[:10]}"
+    if "previous" in note:
+        text += f"; replaced {_fmt(note['previous'])}"
+    return f"({text})"
+
+
+def _parent_display(run: SavedRun) -> str:
+    if run.parent is None:
+        return _fmt(None)
+    return run.parent if run.parent_run() else f"{run.parent} (not found in this runs folder)"
 
 
 def cmd_compare(args) -> int:
@@ -79,7 +110,10 @@ def cmd_compare(args) -> int:
     print("\n## summary")
     print_table(["metric", *ids], [[k, *(_fmt(s.get(k)) for s in summaries)] for k in mkeys])
     print("\n## provenance")
-    print_table(["", *ids], [["status", *(r.status_display() for r in runs)], ["commit", *(r.short_commit() for r in runs)]])
+    rows = [["status", *(r.status_display() for r in runs)], ["commit", *(r.short_commit() for r in runs)]]
+    if any(r.parent is not None for r in runs):
+        rows.append(["parent", *(_parent_display(r) for r in runs)])
+    print_table(["", *ids], rows)
     return 0
 
 
@@ -146,13 +180,41 @@ def cmd_mark(args) -> int:
     return 0
 
 
+def parse_pair(pair: str) -> tuple[str, object]:
+    """``key=value``; the value is parsed as JSON if it can be, else kept as a string."""
+    key, sep, raw = pair.partition("=")
+    key = key.strip()
+    if not sep or not key:
+        raise ValueError(f"expected key=value, got {pair!r}")
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        value = raw
+    return key, value
+
+
+def cmd_annotate(args) -> int:
+    run = find_run(args.run, args.root)
+    values = dict(parse_pair(p) for p in args.pairs)
+    try:
+        replaced = run.annotate(values, force=args.force)
+    except (RuntimeError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    for key, value in values.items():
+        was = f" (was {_fmt(replaced[key])})" if key in replaced else ""
+        print(f"annotated {run.id}: {key}={_fmt(value)}{was}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="exptrail", description=__doc__)
     p.add_argument("--root", type=Path, default=None, help="runs directory (default: $EXPTRAIL_ROOT or ./runs)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("ls", help="list runs")
-    s.add_argument("--metric", action="append", help="summary metric to show (repeatable)")
+    s.add_argument("--metric", "-m", action="append",
+                   help="summary metric to show, instead of the run's primary metric and the first 3 (repeatable)")
     s.set_defaults(func=cmd_ls)
 
     s = sub.add_parser("show", help="show config, summary and meta of a run")
@@ -191,6 +253,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("status", choices=END_STATUSES)
     s.add_argument("--force", action="store_true", help="mark it even if it still shows as running")
     s.set_defaults(func=cmd_mark)
+
+    s = sub.add_parser("annotate", help="add summary values to a finished run (e.g. a leaderboard score)")
+    s.add_argument("run")
+    s.add_argument("pairs", nargs="+", metavar="key=value", help="value parsed as JSON if possible, else a string")
+    s.add_argument("--force", action="store_true", help="overwrite existing keys, or annotate a run that shows as running")
+    s.set_defaults(func=cmd_annotate)
     return p
 
 

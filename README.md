@@ -49,6 +49,10 @@ run.finish()                             # or run.finish("failed"); calling it t
 
 `with Run(...)`, `@track` and `start()`/`finish()` share one code path. Wrap **the whole job**, data loading and evaluation included: `duration_s` only covers the run's own span, and anything that crashes outside it isn't recorded.
 
+`exptrail ls` shows the first 3 summary metrics of each run. Name the one you report with `Run(..., primary="test_acc")` (or `@track(primary="test_acc")`) and `ls` shows it first, then fills the remaining slots in the usual order. It is stored as `primary_metric` in `meta.json`. `exptrail ls --metric NAME` (repeatable, short `-m`) shows exactly the metrics you name for every run, whatever their primary metric, with `—` where a run doesn't have one.
+
+A run that uses another run's output (a predict or rescore run loading a saved model) can point to it with `Run(..., parent="20260924-055909_momentum-lr0.01")` (or `@track(parent=...)`). Only the folder name is stored, as `parent` in `meta.json`; a path is cut down to its folder name, and nothing checks at start that the folder exists. `exptrail show` prints a `parent:` line, marked `(not found in this runs folder)` when that folder isn't next to the run, and `exptrail compare` adds a `parent` row when any of the runs has one.
+
 Each run writes `runs/<UTC timestamp>_<name>/` (override with `root=` or `$EXPTRAIL_ROOT`):
 
 | file | contents |
@@ -56,7 +60,7 @@ Each run writes `runs/<UTC timestamp>_<name>/` (override with `root=` or `$EXPTR
 | `config.json` | the config you passed |
 | `metrics.csv` | one row per `log()` call: `step`, then your metrics |
 | `summary.json` | final numbers, written on every `summary()` call |
-| `meta.json` | status (see [Run status](#run-status)), git commit/branch/remote/dirty flag (and which files set it), Python + numpy/torch/scikit-learn versions, hostname, argv, cwd, seeds, start/end time, and a `liveness` record (hostname, pid, process start time, boot ID, heartbeat interval) |
+| `meta.json` | status (see [Run status](#run-status)), git commit/branch/remote/dirty flag (and which files set it), Python + numpy/torch/scikit-learn versions, hostname, argv, cwd, seeds, start/end time, a `liveness` record (hostname, pid, process start time, boot ID, heartbeat interval), and, only when set, `primary_metric` and `parent` |
 | `heartbeat` | touched every 30 s while the run is alive; removed when it finishes |
 | `git_diff.patch` | uncommitted changes (tracked edits plus new untracked code files), only if there were any |
 | `traceback.txt` | only if the run raised |
@@ -65,6 +69,8 @@ Each run writes `runs/<UTC timestamp>_<name>/` (override with `root=` or `$EXPTR
 Paths in `meta.json` (`cwd`, `python_executable`, `argv`, `git.root`) have your home directory replaced with `~`, so committed runs don't leak your username. Pass `Run(..., redact_paths=False)` to keep them verbatim. Credentials in the git remote URL are always stripped.
 
 A dirty working tree triggers a loud `DirtyTreeWarning`: that run's numbers can't be reproduced from a commit, so commit first if you plan to report them.
+
+If you start many runs from a dirty tree on purpose (quick iterations you won't report), set `EXPTRAIL_QUIET=1` (or `true`/`yes`, any case) to get a one-line warning instead of the banner, e.g. `exptrail: dirty tree (3 files: a.py, b.py, +1 more); patch saved to <run folder>/git_diff.patch`. It is the same `DirtyTreeWarning`, so warning filters and `-W error` behave as before; it still says when untracked files couldn't be checked and when no patch was written. The run is recorded exactly the same either way.
 
 ### What counts as dirty
 
@@ -127,12 +133,14 @@ exptrail mark momentum-lr0.01 interrupted     # or failed / finished; notes that
 
 ```bash
 exptrail ls                                   # name, status, key metrics, commit (* = dirty)
+exptrail ls -m test_acc -m val_loss           # show exactly these summary metrics
 exptrail show momentum-lr0.01                 # config + summary + meta
 exptrail compare sgd-lr0.1 momentum-lr0.01    # config diff + metric table
 exptrail plot sgd-lr0.1 momentum-lr0.01 --metric val_acc -o val_acc.png
 exptrail table --metric test_acc --runs '*digits*' --readme README.md
 exptrail verify README.md                     # non-zero exit on any mismatch
 exptrail mark momentum-lr0.01 interrupted     # make a dead/stale status permanent
+exptrail annotate momentum-lr0.01 lb_score=0.913   # add a number that arrived after the run
 ```
 
 Runs can be referred to by folder name, path, run name (latest wins) or a unique substring. `--root DIR` points any command at another runs directory.
@@ -146,6 +154,8 @@ Runs can be referred to by folder name, path, run name (latest wins) or a unique
 ```
 
 For links in the table to work on GitHub, commit the run folders you report.
+
+**`annotate`** adds `key=value` pairs to a run's `summary.json` after the run has ended, for numbers that only arrive later, such as a leaderboard score. Values are parsed as JSON when they can be (`0.913`, `12`, `true`, `null`) and kept as strings otherwise. `summary.json` stays a flat `key -> value` object, so `table`, `verify` and `show` treat annotated values like any other. Provenance goes in `meta.json` under `annotations`, as `{"lb_score": {"at": "<UTC timestamp>", "by": "hand"}}`, and `show` marks those keys `(added later, <date>)`. `annotate` refuses to overwrite a key that is already in `summary.json`, and refuses a run that still shows as `running`; `--force` does both, and an overwrite also records the old value as `"previous"`. (A run that really is still running rewrites `summary.json` and `meta.json` when it finishes, which drops an annotation made in the meantime.) From Python, `SavedRun(path).annotate({"lb_score": 0.913})` does the same.
 
 ## Example
 

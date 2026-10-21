@@ -36,6 +36,11 @@ class NoGitWarning(UserWarning):
     """No git repository was found, so the run can't be tied to a commit."""
 
 
+def _quiet() -> bool:
+    """``$EXPTRAIL_QUIET`` set to 1/true/yes: one-line DirtyTreeWarning instead of the banner."""
+    return os.environ.get("EXPTRAIL_QUIET", "").strip().lower() in ("1", "true", "yes")
+
+
 def default_root() -> Path:
     return Path(os.environ.get("EXPTRAIL_ROOT", "runs"))
 
@@ -119,6 +124,11 @@ class Run:
     the run dirty (default: ``*.py``, ``*.ipynb``, ``*.pyx``, ``*.yaml``,
     ``*.yml``, ``*.toml``). Either one, when omitted, is read from
     ``[tool.exptrail]`` in the repo's pyproject.toml (Python 3.11+).
+
+    ``primary`` names the headline summary metric; ``exptrail ls`` shows it first.
+    ``parent`` is the folder name of the run this one builds on (e.g. the model
+    run a predict/rescore run loads); only the folder name is stored, and it
+    need not exist yet.
     """
 
     def __init__(
@@ -133,13 +143,25 @@ class Run:
         dirty_ignore: list[str] | None = None,
         untracked_code: list[str] | None = None,
         heartbeat_s: float | None = None,
+        primary: str | None = None,
+        parent: str | None = None,
     ):
+        if primary is not None and not isinstance(primary, str):
+            raise TypeError(f"primary must be a metric name string, got {primary!r}")
+        if parent is not None:
+            if not isinstance(parent, str):
+                raise TypeError(f"parent must be a run folder name string, got {parent!r}")
+            parent = Path(parent).name  # a path to the folder is fine; never store it
+            if parent in ("", ".", ".."):
+                raise ValueError("parent must name a run folder")
         self.name = name
         self.config = dict(config or {})
         self.tags = list(tags or [])
         self.seeds = seeds
         self.notes = notes
         self.redact_paths = redact_paths
+        self.primary = primary
+        self.parent = parent
         # None means "not set here": fall back to pyproject.toml, then the defaults.
         self.dirty_ignore = None if dirty_ignore is None else check_patterns("dirty_ignore", dirty_ignore)
         self.untracked_code = (
@@ -202,6 +224,10 @@ class Run:
             "exptrail_version": __version__,
             "liveness": record(self.heartbeat_s),
         }
+        if self.primary is not None:
+            self.meta["primary_metric"] = self.primary
+        if self.parent is not None:
+            self.meta["parent"] = self.parent
         self._owner_pid = os.getpid()
         self._heartbeat = Heartbeat(self.dir / HEARTBEAT_FILE, self.heartbeat_s)
         self._heartbeat.start()
@@ -266,6 +292,8 @@ class Run:
                 NoGitWarning,
                 stacklevel=user_stacklevel(),
             )
+        elif git["dirty"] and _quiet():
+            warnings.warn(self._quiet_dirty_message(git), DirtyTreeWarning, stacklevel=user_stacklevel())
         elif git["dirty"]:
             dirty = git["dirty_files"]
             names = dirty["tracked"] + [f"{p} (untracked)" for p in dirty["untracked"]]
@@ -305,6 +333,27 @@ class Run:
                 DirtyTreeWarning,
                 stacklevel=user_stacklevel(),
             )
+
+    def _quiet_dirty_message(self, git: dict) -> str:
+        """The one-line DirtyTreeWarning used when ``$EXPTRAIL_QUIET`` is set."""
+        dirty = git["dirty_files"]
+        names = dirty["tracked"] + dirty["untracked"]
+        what = ""
+        if names:
+            shown = ", ".join(names[:2]) + (f", +{len(names) - 2} more" if len(names) > 2 else "")
+            what = f"{len(names)} file{'s' if len(names) != 1 else ''}: {shown}"
+        scan = git.get("untracked_scan", "")
+        if scan.startswith("failed"):
+            what = "; ".join(filter(None, [what, f"untracked files unchecked: {scan[len('failed: '):]}"]))
+        parts = [f"exptrail: dirty tree ({what})"]
+        if git.get("diff_file"):
+            parts.append(f"patch saved to {self.dir.name}/git_diff.patch")
+        hashed = ", ".join(h["path"] for h in git.get("untracked_too_large", []))
+        if hashed:
+            parts.append(f"too large for a patch, recorded by sha256 in meta.json: {hashed}")
+        if not git.get("diff_file"):
+            parts.append("no patch written")
+        return "; ".join(parts)
 
     def finish(self, status: str = "finished", error: str | None = None, *, reason: str | None = None) -> None:
         """Record how the run ended. Safe to call more than once: only the first call counts."""
@@ -445,6 +494,8 @@ def track(
     dirty_ignore: list[str] | None = None,
     untracked_code: list[str] | None = None,
     heartbeat_s: float | None = None,
+    primary: str | None = None,
+    parent: str | None = None,
 ):
     """Decorator form of :class:`Run`.
 
@@ -467,7 +518,8 @@ def track(
                 cfg = {k: v for k, v in with_defaults.arguments.items() if k != "run"}
             with Run(name or func.__name__, config=cfg, tags=tags, seeds=seeds, root=root,
                      redact_paths=redact_paths, dirty_ignore=dirty_ignore,
-                     untracked_code=untracked_code, heartbeat_s=heartbeat_s) as run:
+                     untracked_code=untracked_code, heartbeat_s=heartbeat_s,
+                     primary=primary, parent=parent) as run:
                 if wants_run:
                     # Replace ``run`` wherever it was bound (positional or keyword).
                     bound.arguments["run"] = run
