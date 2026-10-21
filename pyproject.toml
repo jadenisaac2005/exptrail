@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "exptrail"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local, framework-agnostic ML experiment logging that keeps README numbers verifiable."
 readme = "README.md"
 license = "MIT"
