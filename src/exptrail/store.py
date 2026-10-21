@@ -142,8 +142,10 @@ class SavedRun:
             summary[key] = to_jsonable(value)
             notes[key] = note
         meta["annotations"] = notes
-        _write_json(self.path / "summary.json", summary)
+        # Provenance first: a crash between the two writes may leave an
+        # annotation record without its value, never a value without its record.
         _write_json(self.path / "meta.json", meta)
+        _write_json(self.path / "summary.json", summary)
         return replaced
 
     def metrics(self) -> list[dict[str, float]]:
