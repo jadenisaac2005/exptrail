@@ -1,5 +1,8 @@
 # exptrail
 
+[![PyPI](https://img.shields.io/pypi/v/exptrail)](https://pypi.org/project/exptrail/)
+[![tests](https://github.com/jadenisaac2005/exptrail/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/jadenisaac2005/exptrail/actions/workflows/tests.yml)
+
 Local, framework-agnostic experiment logging so that **every number in your README can be traced to a saved run and re-checked**.
 
 README results tables drift: configs get overwritten, loss curves aren't saved, and nobody remembers which commit produced 0.9807. `exptrail` writes each run to its own folder (config, per-step metrics, final numbers, git commit + diff, environment), generates the README table *from those folders*, and `exptrail verify` fails CI if the table and the runs disagree.
@@ -13,6 +16,41 @@ README results tables drift: configs get overwritten, loss curves aren't saved, 
 ```bash
 pip install exptrail            # or: pip install "exptrail[plot]"
 ```
+
+## Quickstart
+
+```python
+# train.py
+from exptrail import Run
+
+with Run(name="baseline", config={"lr": 0.01}) as run:
+    run.log(step=0, val_acc=0.91)
+    run.summary(test_acc=0.9123)
+```
+
+```console
+$ python train.py
+$ exptrail table --metric test_acc --readme README.md
+updated: README.md (1 run)
+$ exptrail verify README.md
+OK: README.md — 1 rows, 1 values checked
+```
+
+Now hand-edit `0.9123` to `0.9500` in the README table and verify again:
+
+```console
+$ exptrail verify README.md
+MISMATCH: baseline: test_acc shows 0.9500 but summary.json has 0.9123
+FAILED: README.md — 1 rows, 1 values checked
+```
+
+The exit code is non-zero, so the same command fails CI.
+
+## When to use it (and when not to)
+
+exptrail is local-first: runs are plain folders next to your code, with no server, no account and no dependencies beyond the standard library. It fits solo and small projects, course and competition work, and any repo where the numbers in the README should be checked against saved runs in CI.
+
+It has no dashboard, no hosted storage and no sweep scheduler. For team dashboards, hosted tracking or large hyperparameter sweeps, MLflow or Weights & Biases fit better.
 
 ## Log a run
 
@@ -49,10 +87,6 @@ run.finish()                             # or run.finish("failed"); calling it t
 
 `with Run(...)`, `@track` and `start()`/`finish()` share one code path. Wrap **the whole job**, data loading and evaluation included: `duration_s` only covers the run's own span, and anything that crashes outside it isn't recorded.
 
-`exptrail ls` shows the first 3 summary metrics of each run. Name the one you report with `Run(..., primary="test_acc")` (or `@track(primary="test_acc")`) and `ls` shows it first, then fills the remaining slots in the usual order. It is stored as `primary_metric` in `meta.json`. `exptrail ls --metric NAME` (repeatable, short `-m`) shows exactly the metrics you name for every run, whatever their primary metric, with `—` where a run doesn't have one.
-
-A run that uses another run's output (a predict or rescore run loading a saved model) can point to it with `Run(..., parent="20260924-055909_momentum-lr0.01")` (or `@track(parent=...)`). Only the folder name is stored, as `parent` in `meta.json`; a path is cut down to its folder name, and nothing checks at start that the folder exists. `exptrail show` prints a `parent:` line, marked `(not found in this runs folder)` when that folder isn't next to the run, and `exptrail compare` adds a `parent` row when any of the runs has one.
-
 Each run writes `runs/<UTC timestamp>_<name>/` (override with `root=` or `$EXPTRAIL_ROOT`):
 
 | file | contents |
@@ -69,37 +103,6 @@ Each run writes `runs/<UTC timestamp>_<name>/` (override with `root=` or `$EXPTR
 Paths in `meta.json` (`cwd`, `python_executable`, `argv`, `git.root`) have your home directory replaced with `~`, so committed runs don't leak your username. Pass `Run(..., redact_paths=False)` to keep them verbatim. Credentials in the git remote URL are always stripped.
 
 A dirty working tree triggers a loud `DirtyTreeWarning`: that run's numbers can't be reproduced from a commit, so commit first if you plan to report them.
-
-If you start many runs from a dirty tree on purpose (quick iterations you won't report), set `EXPTRAIL_QUIET=1` (or `true`/`yes`, any case) to get a one-line warning instead of the banner, e.g. `exptrail: dirty tree (3 files: a.py, b.py, +1 more); patch saved to <run folder>/git_diff.patch`. It is the same `DirtyTreeWarning`, so warning filters and `-W error` behave as before; it still says when untracked files couldn't be checked and when no patch was written. The run is recorded exactly the same either way.
-
-### What counts as dirty
-
-- **Modified tracked files** make a run dirty, unless they match `dirty_ignore`.
-- **Untracked files** make a run dirty only if they look like code, i.e. match `untracked_code`. The default patterns are `*.py`, `*.ipynb`, `*.pyx`, `*.yaml`, `*.yml` and `*.toml`. Other untracked files (CSVs, logs, model outputs, the `runs/` folder) are ignored entirely. Files your `.gitignore` excludes never count, and neither does anything inside a virtualenv (a folder containing `pyvenv.cfg`).
-- **`dirty_ignore`** lists glob patterns for changes that shouldn't mark a run dirty, such as a results log you edit by hand. Those changes don't set the flag, don't warn, and don't fail `verify --strict`, but they are still written to `git_diff.patch`, so the record stays complete.
-
-```python
-Run("momentum-lr0.01", dirty_ignore=["*.md", "submissions/**"],
-    untracked_code=["*.py", "*.yaml"])      # replaces the default code patterns
-```
-
-A pattern without `/` (`*.md`) matches that file name in any directory. A pattern with `/` (`submissions/**`) matches the path from the repo root, and a trailing `/` (`submissions/`) means everything under that folder.
-
-`git_diff.patch` includes untracked code files as new-file diffs, so `git apply git_diff.patch` on the recorded commit rebuilds the tree the run used. Your git index is never touched: the files are added to a temporary copy of it. Untracked files over 1 MB are recorded by path, size and sha256 in `meta.json` (and in the patch header, when there is a patch) instead of being inlined. If such a file is the only change, no `git_diff.patch` is written, since there would be nothing for `git apply` to apply.
-
-`meta.json` records what was found under `git`: `dirty_files` (`tracked` and `untracked` lists of the files that made the run dirty), `ignored_files` (changed files that matched `dirty_ignore`), `changed_files` (every changed file that was recorded, in the patch or by hash), `untracked_too_large` (hashed files, if any), and the `dirty_ignore`/`untracked_code` patterns that were in effect.
-
-If listing untracked files fails (it times out after 60 s, e.g. on a huge un-ignored data folder or a repo on a network drive), the commit, branch and tracked changes are still recorded, `untracked_scan` says why the scan failed, and the run is treated as dirty because it can't be shown to be clean.
-
-On Python 3.11+ you can set the same keys once for the whole repo in `pyproject.toml`. Keyword arguments override it:
-
-```toml
-[tool.exptrail]
-dirty_ignore = ["*.md", "submissions/**"]
-untracked_code = ["*.py", "*.ipynb", "*.yaml"]
-```
-
-Python 3.10 has no built-in TOML parser and exptrail has no dependencies, so on 3.10 a `[tool.exptrail]` section is ignored with a one-time `ConfigWarning`. Pass the keyword arguments instead.
 
 ## Run status
 
@@ -156,6 +159,49 @@ Runs can be referred to by folder name, path, run name (latest wins) or a unique
 For links in the table to work on GitHub, commit the run folders you report.
 
 **`annotate`** adds `key=value` pairs to a run's `summary.json` after the run has ended, for numbers that only arrive later, such as a leaderboard score. Values are parsed as JSON when they can be (`0.913`, `12`, `true`, `null`) and kept as strings otherwise. `summary.json` stays a flat `key -> value` object, so `table`, `verify` and `show` treat annotated values like any other. Provenance goes in `meta.json` under `annotations`, as `{"lb_score": {"at": "<UTC timestamp>", "by": "hand"}}`, and `show` marks those keys `(added later, <date>)`. `annotate` refuses to overwrite a key that is already in `summary.json`, and refuses a run that still shows as `running`; `--force` does both, and an overwrite also records the old value as `"previous"`. (A run that really is still running rewrites `summary.json` and `meta.json` when it finishes, which drops an annotation made in the meantime.) From Python, `SavedRun(path).annotate({"lb_score": 0.913})` does the same.
+
+## Options
+
+### Primary metric
+
+`exptrail ls` shows the first 3 summary metrics of each run. Name the one you report with `Run(..., primary="test_acc")` (or `@track(primary="test_acc")`) and `ls` shows it first, then fills the remaining slots in the usual order. It is stored as `primary_metric` in `meta.json`. `exptrail ls --metric NAME` (repeatable, short `-m`) shows exactly the metrics you name for every run, whatever their primary metric, with `—` where a run doesn't have one.
+
+### Parent run
+
+A run that uses another run's output (a predict or rescore run loading a saved model) can point to it with `Run(..., parent="20260924-055909_momentum-lr0.01")` (or `@track(parent=...)`). Only the folder name is stored, as `parent` in `meta.json`; a path is cut down to its folder name, and nothing checks at start that the folder exists. `exptrail show` prints a `parent:` line, marked `(not found in this runs folder)` when that folder isn't next to the run, and `exptrail compare` adds a `parent` row when any of the runs has one.
+
+### Quiet dirty-tree warning
+
+If you start many runs from a dirty tree on purpose (quick iterations you won't report), set `EXPTRAIL_QUIET=1` (or `true`/`yes`, any case) to get a one-line warning instead of the banner, e.g. `exptrail: dirty tree (3 files: a.py, b.py, +1 more); patch saved to <run folder>/git_diff.patch`. It is the same `DirtyTreeWarning`, so warning filters and `-W error` behave as before; it still says when untracked files couldn't be checked and when no patch was written. The run is recorded exactly the same either way.
+
+### What counts as dirty
+
+- **Modified tracked files** make a run dirty, unless they match `dirty_ignore`.
+- **Untracked files** make a run dirty only if they look like code, i.e. match `untracked_code`. The default patterns are `*.py`, `*.ipynb`, `*.pyx`, `*.yaml`, `*.yml` and `*.toml`. Other untracked files (CSVs, logs, model outputs, the `runs/` folder) are ignored entirely. Files your `.gitignore` excludes never count, and neither does anything inside a virtualenv (a folder containing `pyvenv.cfg`).
+- **`dirty_ignore`** lists glob patterns for changes that shouldn't mark a run dirty, such as a results log you edit by hand. Those changes don't set the flag, don't warn, and don't fail `verify --strict`, but they are still written to `git_diff.patch`, so the record stays complete.
+
+```python
+Run("momentum-lr0.01", dirty_ignore=["*.md", "submissions/**"],
+    untracked_code=["*.py", "*.yaml"])      # replaces the default code patterns
+```
+
+A pattern without `/` (`*.md`) matches that file name in any directory. A pattern with `/` (`submissions/**`) matches the path from the repo root, and a trailing `/` (`submissions/`) means everything under that folder.
+
+`git_diff.patch` includes untracked code files as new-file diffs, so `git apply git_diff.patch` on the recorded commit rebuilds the tree the run used. Your git index is never touched: the files are added to a temporary copy of it. Untracked files over 1 MB are recorded by path, size and sha256 in `meta.json` (and in the patch header, when there is a patch) instead of being inlined. If such a file is the only change, no `git_diff.patch` is written, since there would be nothing for `git apply` to apply.
+
+`meta.json` records what was found under `git`: `dirty_files` (`tracked` and `untracked` lists of the files that made the run dirty), `ignored_files` (changed files that matched `dirty_ignore`), `changed_files` (every changed file that was recorded, in the patch or by hash), `untracked_too_large` (hashed files, if any), and the `dirty_ignore`/`untracked_code` patterns that were in effect.
+
+If listing untracked files fails (it times out after 60 s, e.g. on a huge un-ignored data folder or a repo on a network drive), the commit, branch and tracked changes are still recorded, `untracked_scan` says why the scan failed, and the run is treated as dirty because it can't be shown to be clean.
+
+On Python 3.11+ you can set the same keys once for the whole repo in `pyproject.toml`. Keyword arguments override it:
+
+```toml
+[tool.exptrail]
+dirty_ignore = ["*.md", "submissions/**"]
+untracked_code = ["*.py", "*.ipynb", "*.yaml"]
+```
+
+Python 3.10 has no built-in TOML parser and exptrail has no dependencies, so on 3.10 a `[tool.exptrail]` section is ignored with a one-time `ConfigWarning`. Pass the keyword arguments instead.
 
 ## Example
 
