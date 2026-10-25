@@ -96,11 +96,13 @@ Each run writes `runs/<UTC timestamp>_<name>/` (override with `root=` or `$EXPTR
 | `summary.json` | final numbers, written on every `summary()` call |
 | `meta.json` | status (see [Run status](#run-status)), git commit/branch/remote/dirty flag (and which files set it), Python + numpy/torch/scikit-learn versions, hostname, argv, cwd, seeds, start/end time, a `liveness` record (hostname, pid, process start time, boot ID, heartbeat interval), and, only when set, `primary_metric` and `parent` |
 | `heartbeat` | touched every 30 s while the run is alive; removed when it finishes |
-| `git_diff.patch` | uncommitted changes (tracked edits plus new untracked code files), only if there were any |
+| `git_diff.patch` | uncommitted changes (tracked edits plus new untracked code files; untracked config files are hashed, not copied), only if there were any |
 | `traceback.txt` | only if the run raised |
 | `artifacts/` | anything passed to `save_artifact()` |
 
 Paths in `meta.json` (`cwd`, `python_executable`, `argv`, `git.root`) have your home directory replaced with `~`, so committed runs don't leak your username. Pass `Run(..., redact_paths=False)` to keep them verbatim. Credentials in the git remote URL are always stripped.
+
+> **Before you commit run folders:** uncommitted changes to tracked files, `config.json` and `argv` are saved verbatim (only argv values of options named like `--api-key`, `--token`, `--password` or `--secret` are masked as `***`). Untracked `*.yaml`/`*.yml`/`*.toml` files are recorded by hash, not copied. Untracked files named like secrets (`.env`, `.env.*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_ed25519*`, `.netrc`, `.pypirc`, `*credentials*`, `*secret*`) are always skipped and only listed by path. Gitignore anything sensitive before committing runs.
 
 A dirty working tree triggers a loud `DirtyTreeWarning`: that run's numbers can't be reproduced from a commit, so commit first if you plan to report them.
 
@@ -156,7 +158,7 @@ Runs can be referred to by folder name, path, run name (latest wins) or a unique
 - run: pip install exptrail && exptrail verify README.md
 ```
 
-For links in the table to work on GitHub, commit the run folders you report.
+For links in the table to work on GitHub, commit the run folders you report. Check them for secrets first: see the note under [Log a run](#log-a-run).
 
 **`annotate`** adds `key=value` pairs to a run's `summary.json` after the run has ended, for numbers that only arrive later, such as a leaderboard score. Values are parsed as JSON when they can be (`0.913`, `12`, `true`, `null`) and kept as strings otherwise. `summary.json` stays a flat `key -> value` object, so `table`, `verify` and `show` treat annotated values like any other. Provenance goes in `meta.json` under `annotations`, as `{"lb_score": {"at": "<UTC timestamp>", "by": "hand"}}`, and `show` marks those keys `(added later, <date>)`. `annotate` refuses to overwrite a key that is already in `summary.json`, and refuses a run that still shows as `running`; `--force` does both, and an overwrite also records the old value as `"previous"`. (A run that really is still running rewrites `summary.json` and `meta.json` when it finishes, which drops an annotation made in the meantime.) From Python, `SavedRun(path).annotate({"lb_score": 0.913})` does the same.
 
@@ -177,7 +179,7 @@ If you start many runs from a dirty tree on purpose (quick iterations you won't 
 ### What counts as dirty
 
 - **Modified tracked files** make a run dirty, unless they match `dirty_ignore`.
-- **Untracked files** make a run dirty only if they look like code, i.e. match `untracked_code`. The default patterns are `*.py`, `*.ipynb`, `*.pyx`, `*.yaml`, `*.yml` and `*.toml`. Other untracked files (CSVs, logs, model outputs, the `runs/` folder) are ignored entirely. Files your `.gitignore` excludes never count, and neither does anything inside a virtualenv (a folder containing `pyvenv.cfg`).
+- **Untracked files** make a run dirty only if they look like code, i.e. match `untracked_code`. The default patterns are `*.py`, `*.ipynb`, `*.pyx`, `*.yaml`, `*.yml` and `*.toml`. Untracked `*.yaml`, `*.yml` and `*.toml` files set the flag but are never copied into the patch: they are recorded by path, size and sha256 under `untracked_config` in `meta.json`, so a change is detectable but the contents can't be recovered from the run. Untracked files named like secrets (see the list [above](#log-a-run)) are skipped before `untracked_code` is checked, even with `untracked_code=["*"]`: they are never read, never set the flag, and are only listed under `untracked_skipped_sensitive`. Other untracked files (CSVs, logs, model outputs, the `runs/` folder) are ignored entirely. Files your `.gitignore` excludes never count, and neither does anything inside a virtualenv (a folder containing `pyvenv.cfg`).
 - **`dirty_ignore`** lists glob patterns for changes that shouldn't mark a run dirty, such as a results log you edit by hand. Those changes don't set the flag, don't warn, and don't fail `verify --strict`, but they are still written to `git_diff.patch`, so the record stays complete.
 
 ```python
@@ -189,7 +191,7 @@ A pattern without `/` (`*.md`) matches that file name in any directory. A patter
 
 `git_diff.patch` includes untracked code files as new-file diffs, so `git apply git_diff.patch` on the recorded commit rebuilds the tree the run used. Your git index is never touched: the files are added to a temporary copy of it. Untracked files over 1 MB are recorded by path, size and sha256 in `meta.json` (and in the patch header, when there is a patch) instead of being inlined. If such a file is the only change, no `git_diff.patch` is written, since there would be nothing for `git apply` to apply.
 
-`meta.json` records what was found under `git`: `dirty_files` (`tracked` and `untracked` lists of the files that made the run dirty), `ignored_files` (changed files that matched `dirty_ignore`), `changed_files` (every changed file that was recorded, in the patch or by hash), `untracked_too_large` (hashed files, if any), and the `dirty_ignore`/`untracked_code` patterns that were in effect.
+`meta.json` records what was found under `git`: `dirty_files` (`tracked` and `untracked` lists of the files that made the run dirty), `ignored_files` (changed files that matched `dirty_ignore`), `changed_files` (every changed file that was recorded, in the patch or by hash), `untracked_too_large` and `untracked_config` (hashed files, if any), `untracked_skipped_sensitive` (secret-named files that were skipped), and the `dirty_ignore`/`untracked_code` patterns that were in effect.
 
 If listing untracked files fails (it times out after 60 s, e.g. on a huge un-ignored data folder or a repo on a network drive), the commit, branch and tracked changes are still recorded, `untracked_scan` says why the scan failed, and the run is treated as dirty because it can't be shown to be clean.
 

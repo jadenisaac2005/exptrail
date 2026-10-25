@@ -490,3 +490,96 @@ def test_quiet_warning_still_an_error_under_W_error(repo, monkeypatch):
         warnings.simplefilter("error", DirtyTreeWarning)
         with pytest.raises(DirtyTreeWarning, match="^exptrail: dirty tree"):
             Run("strict").start()
+
+
+# -- secrets: config files hashed, secret-named files skipped ------------------
+
+def test_untracked_config_files_are_hashed_not_inlined(repo, tmp_path_factory):
+    files = {
+        "params.yaml": b"api_key: TEST123\n",
+        "settings.toml": b"token = 'TOMLSECRET'\n",
+    }
+    for name, body in files.items():
+        (repo / name).write_bytes(body)
+    (repo / "secrets.yaml").write_text("password: SKIPPED\n")  # name looks secret: never read
+    (repo / "helper.py").write_text("SAFE = 1\n")  # code is still inlined (the difftok.py case)
+
+    with pytest.warns(DirtyTreeWarning, match="contents not saved: params.yaml, settings.toml"):
+        with Run("config") as run:
+            pass
+
+    info = read_meta(run)
+    assert info["dirty"] is True
+    assert sorted(info["dirty_files"]["untracked"]) == ["helper.py", "params.yaml", "settings.toml"]
+    assert info["untracked_config"] == [
+        {"path": name, "size": len(body), "sha256": hashlib.sha256(body).hexdigest(),
+         "reason": "config file: contents not saved"}
+        for name, body in files.items()
+    ]
+    assert "untracked_too_large" not in info
+    assert info["untracked_skipped_sensitive"] == ["secrets.yaml"]
+    for path in run.dir.rglob("*"):
+        if path.is_file():
+            text = path.read_bytes()
+            assert b"TEST123" not in text and b"TOMLSECRET" not in text and b"SKIPPED" not in text
+    patch = patch_of(run)
+    assert "+SAFE = 1" in patch
+    assert f"settings.toml  size=21  sha256={hashlib.sha256(files['settings.toml']).hexdigest()}" in patch
+
+    # The patch still applies: the config files are only named in its header.
+    clone = tmp_path_factory.mktemp("clone")
+    git(clone, "clone", "-q", str(repo), ".")
+    git(clone, "apply", str(run.dir / "git_diff.patch"))
+    assert (clone / "helper.py").read_text() == "SAFE = 1\n"
+    assert not (clone / "settings.toml").exists()
+
+
+def test_config_only_change_writes_no_patch(repo):
+    (repo / "settings.toml").write_text("token = 'TOMLSECRET'\n")
+    with pytest.warns(DirtyTreeWarning) as record:
+        with Run("config-only") as run:
+            pass
+    assert "contents not saved: settings.toml." in str(record[0].message)
+    assert "git_diff.patch" not in str(record[0].message)
+    assert not (run.dir / "git_diff.patch").exists()
+    info = read_meta(run)
+    assert info["dirty"] is True
+    assert [h["path"] for h in info["untracked_config"]] == ["settings.toml"]
+
+
+def test_secret_named_files_always_skipped(repo):
+    secrets = [".env", ".env.local", "key.pem", "credentials.json", "conf/My_Secret.txt",
+               "deploy/ID_RSA", ".netrc", "cert.P12"]
+    for name in secrets:
+        (repo / name).parent.mkdir(exist_ok=True)
+        (repo / name).write_text("TEST456\n")
+
+    run = run_clean(untracked_code=["*"])  # no DirtyTreeWarning: they don't set the flag
+    info = read_meta(run)
+    assert info["dirty"] is False
+    assert info["dirty_files"] == {"tracked": [], "untracked": []}
+    assert sorted(info["untracked_skipped_sensitive"]) == sorted(secrets)
+    assert "changed_files" not in info and "untracked_config" not in info
+    assert not (run.dir / "git_diff.patch").exists()
+
+    (repo / "helper.py").write_text("SAFE = 1\n")  # real code alongside: still inlined, as before
+    with pytest.warns(DirtyTreeWarning, match=r"helper\.py \(untracked\)"):
+        with Run("star", untracked_code=["*"]) as run:
+            pass
+    info = read_meta(run)
+    assert info["dirty_files"]["untracked"] == ["helper.py"]
+    patch = patch_of(run)
+    assert "+SAFE = 1" in patch and "TEST456" not in patch
+    assert not any(name in patch for name in secrets)
+
+
+def test_quiet_warning_names_config_files(repo, monkeypatch):
+    monkeypatch.setenv("EXPTRAIL_QUIET", "1")
+    (repo / "settings.toml").write_text("a = 1\n")
+    with pytest.warns(DirtyTreeWarning) as record:
+        with Run("quiet-config"):
+            pass
+    assert only_warning(record) == (
+        "exptrail: dirty tree (1 file: settings.toml); "
+        "config files recorded by sha256 in meta.json: settings.toml; no patch written"
+    )

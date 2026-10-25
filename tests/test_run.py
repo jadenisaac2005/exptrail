@@ -164,6 +164,21 @@ def test_redact_paths_opt_out(repo, fake_home):
     assert meta["argv"][0] == str(repo / "train.py")
 
 
+def test_secret_argv_values_masked(repo, fake_home, monkeypatch):
+    monkeypatch.setattr(sys, "argv", [
+        "train.py", "--api-key=ARGVSECRET", "--HF_TOKEN", "hf_abc", "--db-password", "pw",
+        "--secret-file=~/s.txt", "--lr", "0.1", f"--out={repo}/o.npz", "--use-token-cache", "--epochs=3",
+    ])
+    with Run("argv") as run:
+        pass
+    assert read(run, "meta.json")["argv"] == [
+        "train.py", "--api-key=***", "--HF_TOKEN", "***", "--db-password", "***",
+        "--secret-file=***", "--lr", "0.1", f"--out=~/{repo.name}/o.npz", "--use-token-cache", "--epochs=3",
+    ]
+    text = (run.dir / "meta.json").read_text()
+    assert "ARGVSECRET" not in text and "hf_abc" not in text
+
+
 @pytest.mark.parametrize(
     "url,expected",
     [

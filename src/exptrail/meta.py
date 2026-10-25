@@ -56,6 +56,16 @@ def _clean_remote(url: str) -> str:
 
 DEFAULT_UNTRACKED_CODE = ("*.py", "*.ipynb", "*.pyx", "*.yaml", "*.yml", "*.toml")
 MAX_UNTRACKED_BYTES = 1_000_000
+# Untracked config files still count as code, but are recorded by hash only:
+# they often hold credentials, and committed run folders would publish them.
+NEVER_INLINE = ("*.yaml", "*.yml", "*.toml")
+CONFIG_REASON = "config file: contents not saved"
+# Untracked files with these names are never read, hashed or counted, whatever
+# untracked_code says. Matched case-insensitively on the file name.
+ALWAYS_SKIP = (
+    ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*",
+    ".netrc", ".pypirc", "*credentials*", "*secret*",
+)
 # Listing untracked files walks the whole work tree, which can be slow with a big
 # un-ignored data folder or a repo on a network drive (Colab + Google Drive).
 UNTRACKED_SCAN_TIMEOUT = 60
@@ -125,6 +135,12 @@ def _matches(path: str, patterns: list[str]) -> bool:
     return False
 
 
+def _name_matches(path: str, patterns) -> bool:
+    """Case-insensitive match of the file name alone against ``patterns``."""
+    name = path.rsplit("/", 1)[-1].lower()
+    return any(fnmatch.fnmatchcase(name, pat) for pat in patterns)
+
+
 def _split_z(out: str) -> list[str]:
     return [p for p in out.split("\0") if p]
 
@@ -176,29 +192,36 @@ def _diff_with_untracked(top: Path, untracked: list[str], timeout: float) -> str
 
 def _scan_untracked(
     root: Path, patterns: list[str], skip: list[str], max_bytes: int, timeout: float
-) -> tuple[list[str], list[dict]]:
-    """Untracked code files: (paths to inline in the patch, [{path, size, sha256}] too big to inline)."""
+) -> tuple[list[str], list[dict], list[str]]:
+    """Untracked code files: (paths to inline in the patch, [{path, size, sha256}]
+    recorded by hash instead, paths skipped because their name looks sensitive).
+
+    Hashed entries for config files carry a ``reason``; oversized ones don't.
+    """
     out = _git(["ls-files", "--others", "--exclude-standard", "-z"], root, timeout=timeout)
     if out.returncode != 0:
         raise subprocess.CalledProcessError(out.returncode, "git ls-files", stderr=out.stderr)
     venv_cache: dict = {}
-    inline, hashed = [], []
+    inline, hashed, sensitive = [], [], []
     for p in _split_z(out.stdout):
-        if (
-            not _matches(p, patterns)
-            or any(p.startswith(d) for d in skip)
-            or _in_virtualenv(p, root, venv_cache)
-        ):
+        if any(p.startswith(d) for d in skip) or _in_virtualenv(p, root, venv_cache):
+            continue
+        if _name_matches(p, ALWAYS_SKIP):
+            sensitive.append(p)
+            continue
+        if not _matches(p, patterns):
             continue
         f = root / p
         if not f.is_file():  # a symlink to a directory, a socket, ...
             continue
         size = f.stat().st_size
-        if size > max_bytes:
+        if _name_matches(p, NEVER_INLINE):
+            hashed.append({"path": p, "size": size, "sha256": _sha256(f), "reason": CONFIG_REASON})
+        elif size > max_bytes:
             hashed.append({"path": p, "size": size, "sha256": _sha256(f)})
         else:
             inline.append(p)
-    return inline, hashed
+    return inline, hashed, sensitive
 
 
 def _describe_failure(exc: BaseException) -> str:
@@ -222,7 +245,9 @@ def git_info(
     or an untracked, non-gitignored file matches ``untracked_code``. Other
     untracked files (CSVs, logs, the runs directory itself) are ignored. The
     patch holds every tracked change, ignored or not, plus untracked code files
-    up to ``max_untracked_bytes`` each; larger ones are recorded by sha256.
+    up to ``max_untracked_bytes`` each; larger ones, and untracked config files
+    (``NEVER_INLINE``) of any size, are recorded by sha256. Untracked files
+    named like secrets (``ALWAYS_SKIP``) are only listed by path.
 
     ``dirty_ignore``/``untracked_code`` of None fall back to ``[tool.exptrail]``
     in the repo's pyproject.toml, then to the defaults. Untracked files under
@@ -264,7 +289,7 @@ def git_info(
         # The untracked scan gets its own try: if it fails, keep everything else.
         scan_error = None
         try:
-            inline, hashed = _scan_untracked(
+            inline, hashed, sensitive = _scan_untracked(
                 root, untracked_code, skip, max_untracked_bytes, UNTRACKED_SCAN_TIMEOUT
             )
             diff = (
@@ -273,7 +298,7 @@ def git_info(
             )
         except (OSError, subprocess.SubprocessError) as exc:
             scan_error = _describe_failure(exc)
-            inline, hashed = [], []
+            inline, hashed, sensitive = [], [], []
             diff = _git(["diff", "HEAD", "--binary"], root).stdout if tracked else None
         recorded_untracked = inline + [h["path"] for h in hashed]
 
@@ -299,18 +324,29 @@ def git_info(
             info["untracked_scan"] = f"failed: {scan_error}"
         if tracked or recorded_untracked:
             info["changed_files"] = tracked + recorded_untracked
-        if hashed:
-            info["untracked_too_large"] = hashed
+        too_large = [h for h in hashed if "reason" not in h]
+        config = [h for h in hashed if "reason" in h]
+        if too_large:
+            info["untracked_too_large"] = too_large
+        if config:
+            info["untracked_config"] = config
+        if sensitive:
+            info["untracked_skipped_sensitive"] = sensitive
         if not diff:
             # Nothing git can apply (e.g. the only change is a file recorded by
             # hash): write no patch rather than one that `git apply` rejects.
             return info, None
-        if hashed:
-            note = [
+        note = []
+        if too_large:
+            note.append(
                 "# exptrail: untracked files over the size limit "
                 f"({max_untracked_bytes} bytes) are recorded by hash, not included below:"
-            ]
-            note += [f"#   {h['path']}  size={h['size']}  sha256={h['sha256']}" for h in hashed]
+            )
+            note += [f"#   {h['path']}  size={h['size']}  sha256={h['sha256']}" for h in too_large]
+        if config:
+            note.append("# exptrail: untracked config files are recorded by hash, not included below:")
+            note += [f"#   {h['path']}  size={h['size']}  sha256={h['sha256']}" for h in config]
+        if note:
             diff = "\n".join(note) + "\n" + diff
         return info, diff
     except (OSError, subprocess.SubprocessError) as exc:
@@ -339,6 +375,31 @@ def redact_home(text: str, home: str | None = None) -> str:
     return re.sub(pattern, "~", text)
 
 
+_SECRET_FLAG = re.compile(r"key|token|passwd|password|secret", re.IGNORECASE)
+
+
+def mask_argv(argv: list[str]) -> list[str]:
+    """Replace the value of any ``--*key*``/``*token*``/``*password*``/``*secret*``
+    option with ``***``, in both ``--api-key=VALUE`` and ``--api-key VALUE`` form."""
+    out = []
+    mask_next = False
+    for arg in argv:
+        if mask_next and not arg.startswith("-"):
+            out.append("***")
+            mask_next = False
+            continue
+        mask_next = False
+        if arg.startswith("-") and arg != "--":
+            flag, eq, _ = arg.partition("=")
+            if _SECRET_FLAG.search(flag):
+                if eq:
+                    arg = f"{flag}=***"
+                else:
+                    mask_next = True
+        out.append(arg)
+    return out
+
+
 def environment(redact_paths: bool = True) -> dict:
     clean = redact_home if redact_paths else (lambda s: s)
     return {
@@ -346,7 +407,7 @@ def environment(redact_paths: bool = True) -> dict:
         "python_executable": clean(sys.executable),
         "platform": platform.platform(),
         "hostname": socket.gethostname(),
-        "argv": [clean(a) for a in sys.argv],
+        "argv": mask_argv([clean(a) for a in sys.argv]),
         "cwd": clean(str(Path.cwd())),
         "packages": package_versions(),
     }
