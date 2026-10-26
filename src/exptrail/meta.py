@@ -60,8 +60,9 @@ MAX_UNTRACKED_BYTES = 1_000_000
 # they often hold credentials, and committed run folders would publish them.
 NEVER_INLINE = ("*.yaml", "*.yml", "*.toml")
 CONFIG_REASON = "config file: contents not saved"
-# Untracked files with these names are never read, hashed or counted, whatever
-# untracked_code says. Matched case-insensitively on the file name.
+# Untracked files with these names are never read or hashed, whatever
+# untracked_code says; one that also matches untracked_code still marks the run
+# dirty. Matched case-insensitively on the file name.
 ALWAYS_SKIP = (
     ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*",
     ".netrc", ".pypirc", "*credentials*", "*secret*",
@@ -192,9 +193,10 @@ def _diff_with_untracked(top: Path, untracked: list[str], timeout: float) -> str
 
 def _scan_untracked(
     root: Path, patterns: list[str], skip: list[str], max_bytes: int, timeout: float
-) -> tuple[list[str], list[dict], list[str]]:
+) -> tuple[list[str], list[dict], list[str], list[str]]:
     """Untracked code files: (paths to inline in the patch, [{path, size, sha256}]
-    recorded by hash instead, paths skipped because their name looks sensitive).
+    recorded by hash instead, paths skipped because their name looks sensitive,
+    the skipped paths that match ``patterns`` and so still count as code).
 
     Hashed entries for config files carry a ``reason``; oversized ones don't.
     """
@@ -202,12 +204,14 @@ def _scan_untracked(
     if out.returncode != 0:
         raise subprocess.CalledProcessError(out.returncode, "git ls-files", stderr=out.stderr)
     venv_cache: dict = {}
-    inline, hashed, sensitive = [], [], []
+    inline, hashed, sensitive, sensitive_code = [], [], [], []
     for p in _split_z(out.stdout):
         if any(p.startswith(d) for d in skip) or _in_virtualenv(p, root, venv_cache):
             continue
         if _name_matches(p, ALWAYS_SKIP):
             sensitive.append(p)
+            if _matches(p, patterns):
+                sensitive_code.append(p)
             continue
         if not _matches(p, patterns):
             continue
@@ -221,7 +225,7 @@ def _scan_untracked(
             hashed.append({"path": p, "size": size, "sha256": _sha256(f)})
         else:
             inline.append(p)
-    return inline, hashed, sensitive
+    return inline, hashed, sensitive, sensitive_code
 
 
 def _describe_failure(exc: BaseException) -> str:
@@ -247,7 +251,8 @@ def git_info(
     patch holds every tracked change, ignored or not, plus untracked code files
     up to ``max_untracked_bytes`` each; larger ones, and untracked config files
     (``NEVER_INLINE``) of any size, are recorded by sha256. Untracked files
-    named like secrets (``ALWAYS_SKIP``) are only listed by path.
+    named like secrets (``ALWAYS_SKIP``) are only listed by path; if they also
+    match ``untracked_code`` they still make the run dirty.
 
     ``dirty_ignore``/``untracked_code`` of None fall back to ``[tool.exptrail]``
     in the repo's pyproject.toml, then to the defaults. Untracked files under
@@ -289,7 +294,7 @@ def git_info(
         # The untracked scan gets its own try: if it fails, keep everything else.
         scan_error = None
         try:
-            inline, hashed, sensitive = _scan_untracked(
+            inline, hashed, sensitive, sensitive_code = _scan_untracked(
                 root, untracked_code, skip, max_untracked_bytes, UNTRACKED_SCAN_TIMEOUT
             )
             diff = (
@@ -298,13 +303,16 @@ def git_info(
             )
         except (OSError, subprocess.SubprocessError) as exc:
             scan_error = _describe_failure(exc)
-            inline, hashed, sensitive = [], [], []
+            inline, hashed, sensitive, sensitive_code = [], [], [], []
             diff = _git(["diff", "HEAD", "--binary"], root).stdout if tracked else None
         recorded_untracked = inline + [h["path"] for h in hashed]
 
         dirty_tracked = [p for p in tracked if not _matches(p, dirty_ignore)]
-        dirty_untracked = [p for p in recorded_untracked if not _matches(p, dirty_ignore)]
-        ignored = [p for p in tracked + recorded_untracked if _matches(p, dirty_ignore)]
+        # Secret-named code is never saved, but it still counts: the run used
+        # code that the commit doesn't have.
+        untracked_code_files = recorded_untracked + sensitive_code
+        dirty_untracked = [p for p in untracked_code_files if not _matches(p, dirty_ignore)]
+        ignored = [p for p in tracked + untracked_code_files if _matches(p, dirty_ignore)]
 
         branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], root).stdout.strip()
         remote = _git(["remote", "get-url", "origin"], root)
@@ -375,12 +383,23 @@ def redact_home(text: str, home: str | None = None) -> str:
     return re.sub(pattern, "~", text)
 
 
-_SECRET_FLAG = re.compile(r"key|token|passwd|password|secret", re.IGNORECASE)
+SECRET_FLAG_WORDS = frozenset({"key", "token", "secret", "password", "passwd", "apikey", "pwd"})
+
+
+def _is_secret_flag(flag: str) -> bool:
+    """True if a word of the option name (split on ``-``/``_``) names a secret.
+
+    Whole words only: ``--api-key`` and ``--HF_TOKEN`` match, ``--max-tokens``
+    and ``--tokenizer`` don't.
+    """
+    words = re.split(r"[-_]", flag.lstrip("-").lower())
+    return not SECRET_FLAG_WORDS.isdisjoint(words)
 
 
 def mask_argv(argv: list[str]) -> list[str]:
-    """Replace the value of any ``--*key*``/``*token*``/``*password*``/``*secret*``
-    option with ``***``, in both ``--api-key=VALUE`` and ``--api-key VALUE`` form."""
+    """Replace the value of any option named like a secret (``--api-key``,
+    ``--token``, ``--db-password``, ...) with ``***``, in both
+    ``--api-key=VALUE`` and ``--api-key VALUE`` form."""
     out = []
     mask_next = False
     for arg in argv:
@@ -391,7 +410,7 @@ def mask_argv(argv: list[str]) -> list[str]:
         mask_next = False
         if arg.startswith("-") and arg != "--":
             flag, eq, _ = arg.partition("=")
-            if _SECRET_FLAG.search(flag):
+            if _is_secret_flag(flag):
                 if eq:
                     arg = f"{flag}=***"
                 else:

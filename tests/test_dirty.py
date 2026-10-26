@@ -510,7 +510,9 @@ def test_untracked_config_files_are_hashed_not_inlined(repo, tmp_path_factory):
 
     info = read_meta(run)
     assert info["dirty"] is True
-    assert sorted(info["dirty_files"]["untracked"]) == ["helper.py", "params.yaml", "settings.toml"]
+    # secrets.yaml matches *.yaml, so it counts as code: dirty, but never read.
+    assert sorted(info["dirty_files"]["untracked"]) == [
+        "helper.py", "params.yaml", "secrets.yaml", "settings.toml"]
     assert info["untracked_config"] == [
         {"path": name, "size": len(body), "sha256": hashlib.sha256(body).hexdigest(),
          "reason": "config file: contents not saved"}
@@ -547,30 +549,85 @@ def test_config_only_change_writes_no_patch(repo):
     assert [h["path"] for h in info["untracked_config"]] == ["settings.toml"]
 
 
-def test_secret_named_files_always_skipped(repo):
+def run_folder_bytes(run):
+    return b"".join(p.read_bytes() for p in run.dir.rglob("*") if p.is_file())
+
+
+def test_secret_named_files_never_saved_but_still_dirty(repo):
     secrets = [".env", ".env.local", "key.pem", "credentials.json", "conf/My_Secret.txt",
                "deploy/ID_RSA", ".netrc", "cert.P12"]
-    for name in secrets:
+    bodies = {}
+    for i, name in enumerate(secrets):
         (repo / name).parent.mkdir(exist_ok=True)
-        (repo / name).write_text("TEST456\n")
+        bodies[name] = f"TEST456_{i}\n".encode()
+        (repo / name).write_bytes(bodies[name])
 
-    run = run_clean(untracked_code=["*"])  # no DirtyTreeWarning: they don't set the flag
+    # They all match "*", so they are code the commit doesn't have: dirty, but never read.
+    with pytest.warns(DirtyTreeWarning, match="Not saved because the name looks sensitive: ") as record:
+        with Run("star-only", untracked_code=["*"]) as run:
+            pass
+    assert all(name in str(record[0].message) for name in secrets[:5])  # banner shows 5 names
     info = read_meta(run)
-    assert info["dirty"] is False
-    assert info["dirty_files"] == {"tracked": [], "untracked": []}
+    assert info["dirty"] is True
+    assert sorted(info["dirty_files"]["untracked"]) == sorted(secrets)
     assert sorted(info["untracked_skipped_sensitive"]) == sorted(secrets)
-    assert "changed_files" not in info and "untracked_config" not in info
+    assert "changed_files" not in info
+    assert "untracked_config" not in info and "untracked_too_large" not in info
     assert not (run.dir / "git_diff.patch").exists()
+    saved = run_folder_bytes(run)
+    for body in bodies.values():
+        assert body.strip() not in saved
+        assert hashlib.sha256(body).hexdigest().encode() not in saved
 
     (repo / "helper.py").write_text("SAFE = 1\n")  # real code alongside: still inlined, as before
     with pytest.warns(DirtyTreeWarning, match=r"helper\.py \(untracked\)"):
         with Run("star", untracked_code=["*"]) as run:
             pass
     info = read_meta(run)
-    assert info["dirty_files"]["untracked"] == ["helper.py"]
+    assert sorted(info["dirty_files"]["untracked"]) == sorted(secrets + ["helper.py"])
+    assert info["changed_files"] == ["helper.py"]
     patch = patch_of(run)
-    assert "+SAFE = 1" in patch and "TEST456" not in patch
+    assert "+SAFE = 1" in patch and b"TEST456" not in run_folder_bytes(run)
     assert not any(name in patch for name in secrets)
+
+
+def test_secret_named_code_file_marks_run_dirty(repo):
+    (repo / "train.py").write_text("from credentials_loader import TOKEN\n")
+    commit_all(repo)
+    (repo / "credentials_loader.py").write_text("TOKEN='LOADERSECRET'\n")
+    with pytest.warns(DirtyTreeWarning) as record:
+        with Run("loader") as run:
+            pass
+    message = str(record[0].message)
+    assert "credentials_loader.py (untracked)" in message
+    assert "Not saved because the name looks sensitive: credentials_loader.py." in message
+    info = read_meta(run)
+    assert info["dirty"] is True
+    assert info["dirty_files"] == {"tracked": [], "untracked": ["credentials_loader.py"]}
+    assert info["untracked_skipped_sensitive"] == ["credentials_loader.py"]
+    assert "changed_files" not in info
+    assert not (run.dir / "git_diff.patch").exists()
+    assert b"LOADERSECRET" not in run_folder_bytes(run)
+
+
+def test_quiet_warning_names_secret_named_code(repo, monkeypatch):
+    monkeypatch.setenv("EXPTRAIL_QUIET", "1")
+    (repo / "credentials_loader.py").write_text("TOKEN='LOADERSECRET'\n")
+    with pytest.warns(DirtyTreeWarning) as record:
+        with Run("quiet-loader"):
+            pass
+    assert only_warning(record) == (
+        "exptrail: dirty tree (1 file: credentials_loader.py); "
+        "not saved because the name looks sensitive: credentials_loader.py; no patch written"
+    )
+
+
+def test_untracked_env_alone_is_clean(repo):
+    (repo / ".env").write_text("KEY=TEST456\n")
+    info = read_meta(run_clean())
+    assert info["dirty"] is False
+    assert info["untracked_skipped_sensitive"] == [".env"]
+    assert info["dirty_files"] == {"tracked": [], "untracked": []}
 
 
 def test_quiet_warning_names_config_files(repo, monkeypatch):

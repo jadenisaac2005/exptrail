@@ -41,6 +41,12 @@ def _quiet() -> bool:
     return os.environ.get("EXPTRAIL_QUIET", "").strip().lower() in ("1", "true", "yes")
 
 
+def _sensitive_code(git: dict) -> str:
+    """Comma-separated dirty untracked files whose contents weren't saved (secret-like name)."""
+    skipped = set(git.get("untracked_skipped_sensitive", []))
+    return ", ".join(p for p in git["dirty_files"]["untracked"] if p in skipped)
+
+
 def default_root() -> Path:
     return Path(os.environ.get("EXPTRAIL_ROOT", "runs"))
 
@@ -310,6 +316,9 @@ class Run:
             config = ", ".join(h["path"] for h in git.get("untracked_config", []))
             if config:
                 hashed += f"Config files recorded by sha256 in meta.json, contents not saved: {config}.\n"
+            sensitive = _sensitive_code(git)
+            if sensitive:
+                hashed += f"Not saved because the name looks sensitive: {sensitive}.\n"
             if scan.startswith("failed"):
                 files = ", ".join(filter(None, [files, "untracked files unchecked"]))
                 saved = f"Tracked changes were saved to {patch}.\n" if git.get("diff_file") else ""
@@ -360,6 +369,9 @@ class Run:
         config = ", ".join(h["path"] for h in git.get("untracked_config", []))
         if config:
             parts.append(f"config files recorded by sha256 in meta.json: {config}")
+        sensitive = _sensitive_code(git)
+        if sensitive:
+            parts.append(f"not saved because the name looks sensitive: {sensitive}")
         if not git.get("diff_file"):
             parts.append("no patch written")
         return "; ".join(parts)
