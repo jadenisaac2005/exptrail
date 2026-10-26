@@ -41,6 +41,12 @@ def _quiet() -> bool:
     return os.environ.get("EXPTRAIL_QUIET", "").strip().lower() in ("1", "true", "yes")
 
 
+def _sensitive_code(git: dict) -> str:
+    """Comma-separated dirty untracked files whose contents weren't saved (secret-like name)."""
+    skipped = set(git.get("untracked_skipped_sensitive", []))
+    return ", ".join(p for p in git["dirty_files"]["untracked"] if p in skipped)
+
+
 def default_root() -> Path:
     return Path(os.environ.get("EXPTRAIL_ROOT", "runs"))
 
@@ -122,8 +128,11 @@ class Run:
     changes don't mark the run dirty; they are still saved to git_diff.patch.
     ``untracked_code`` lists the patterns an untracked file must match to mark
     the run dirty (default: ``*.py``, ``*.ipynb``, ``*.pyx``, ``*.yaml``,
-    ``*.yml``, ``*.toml``). Either one, when omitted, is read from
-    ``[tool.exptrail]`` in the repo's pyproject.toml (Python 3.11+).
+    ``*.yml``, ``*.toml``). Untracked config files (``*.yaml``, ``*.yml``,
+    ``*.toml``) are recorded by sha256, never copied, and files named like
+    secrets (``.env``, ``*.pem``, ``*secret*``, ...) are always skipped. Either
+    one, when omitted, is read from ``[tool.exptrail]`` in the repo's
+    pyproject.toml (Python 3.11+).
 
     ``primary`` names the headline summary metric; ``exptrail ls`` shows it first.
     ``parent`` is the folder name of the run this one builds on (e.g. the model
@@ -304,6 +313,12 @@ class Run:
             hashed = ", ".join(h["path"] for h in git.get("untracked_too_large", []))
             if hashed:
                 hashed = f"Too large to include, recorded by sha256 in meta.json: {hashed}.\n"
+            config = ", ".join(h["path"] for h in git.get("untracked_config", []))
+            if config:
+                hashed += f"Config files recorded by sha256 in meta.json, contents not saved: {config}.\n"
+            sensitive = _sensitive_code(git)
+            if sensitive:
+                hashed += f"Not saved because the name looks sensitive: {sensitive}.\n"
             if scan.startswith("failed"):
                 files = ", ".join(filter(None, [files, "untracked files unchecked"]))
                 saved = f"Tracked changes were saved to {patch}.\n" if git.get("diff_file") else ""
@@ -351,6 +366,12 @@ class Run:
         hashed = ", ".join(h["path"] for h in git.get("untracked_too_large", []))
         if hashed:
             parts.append(f"too large for a patch, recorded by sha256 in meta.json: {hashed}")
+        config = ", ".join(h["path"] for h in git.get("untracked_config", []))
+        if config:
+            parts.append(f"config files recorded by sha256 in meta.json: {config}")
+        sensitive = _sensitive_code(git)
+        if sensitive:
+            parts.append(f"not saved because the name looks sensitive: {sensitive}")
         if not git.get("diff_file"):
             parts.append("no patch written")
         return "; ".join(parts)
